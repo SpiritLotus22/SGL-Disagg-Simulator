@@ -189,6 +189,7 @@ Event = (time_ms, priority, seq, target, message)
 | `BootstrapGrant` / `BootstrapWait` / `BootstrapReject` | D → P | 成功 / 排队（等待不是拒绝）/ 硬拒 |
 | `KvChunk` | P → D | 一块 KV 数据，边算边传 |
 | `RetractRetry` | D → P | 显存超支，请求回炉重做 |
+| `RetractWaste` | P → metrics | 一次回撤丢弃的 prefill 算力 |
 | `DoneNotice` | D → Router | 请求完成 |
 | `Heartbeat` / `DecodeHeartbeat` | P/D → Router | 负载视图上报 |
 | `DecisionNotice` | 任意 → metrics | 不产生其他流量的硬决策 |
@@ -224,6 +225,26 @@ Event = (time_ms, priority, seq, target, message)
    保留已生成 token，回 P 中止本地工作后重做握手与 prefill，且重试
    要求更大的头寸（`retract_retry_margin`）防止反复振荡；丢弃的
    prefill 算力计入 `retract_rework_tokens`，同时准入估算调回悲观。
+
+### 准入控制链
+
+一条请求要被系统接纳，要连过三关。三关由三个角色把守，各自只用
+自己掌握的信息做判断——没有任何一关能预知真实输出长度：
+
+1. **Router 入口校验**（`Router._route`）：只挡"永远不可能"的请求——
+   `input > context_len` 或 `input > prefill 池容量`，硬拒
+   `REJECT_PREFILL_PRESSURE`，不进入握手。这一关不做负载估计；
+2. **Decode 侧 prealloc 闸门**（`DecodeInstance._verdict`）：在任何
+   prefill 计算发生之前，先真实预留 prompt KV（`ceil_page(input) +
+   num_reserved_decode_tokens`），再为已准入请求的未来生成做乐观虚拟
+   预留。头寸够 → Grant；暂时不够 → 排队（等待不是拒绝）；独占也放
+   不下 → 硬拒 `REJECT_DECODE_KV`；
+3. **Prefill 池闸门**（`PrefillInstance._promote`）：拿到 Grant 后，
+   在途 prompt 总量不得超过 `prefill.pool_tokens`，超过则排队等池
+   空间。
+
+三关全部是 backpressure 而非拒绝：除了两种硬拒，请求只会排队，不会
+被丢弃。乐观估计出错时由 retract 兜底（见生命周期第 6 步）。
 
 ### Prefill 建模
 
@@ -326,7 +347,7 @@ sim_async/
 ├── scenarios/           # 场景配置（two_p_two_d / four_p_two_d）
 ├── examples/            # example.json、series_generate.py、time-series.json
 ├── traces/              # --trace 的事件流输出
-└── tests/               # 测试套件（33 个用例）
+└── tests/               # 测试套件（39 个用例）
 ```
 
 ## 待改进
