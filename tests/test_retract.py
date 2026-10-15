@@ -18,6 +18,7 @@ OVERRUN_TRACE = [{"input": 500, "output": 1000, "cache_hit": 0,
 OVERRUN_CONFIG = dict(
     decode_pool_tokens=5_000, decode_kv_watermark=1.0,
     num_reserved_decode_tokens=0, page_size=1,
+    max_new_tokens=4_096,  # declared cap must cover the trace outputs
     clip_max_new_tokens=4096,
     decode_iter_base_ms=5.0, decode_iter_slope_ms=0.0,
     prefill_tps=400_000, transfer_base_latency_ms=0.1,
@@ -62,7 +63,7 @@ class TestRetract(unittest.TestCase):
         config = SimConfig(
             decode_pool_tokens=3_000, decode_kv_watermark=1.0,
             num_reserved_decode_tokens=0, page_size=1,
-            clip_max_new_tokens=4096,
+            max_new_tokens=4_096, clip_max_new_tokens=4096,
             decode_iter_base_ms=1.0, decode_iter_slope_ms=0.0,
             init_new_token_ratio=0.01, min_new_token_ratio=0.01,
             prefill_tps=100, transfer_base_latency_ms=0.1,
@@ -83,7 +84,8 @@ class TestRetryHysteresis(unittest.TestCase):
         return DecodeInstance(
             "decode-0", pool_tokens=2_000, watermark=1.0,
             perf=DecodePerf(base_ms=1.0, slope_ms=0.0),
-            max_running_requests=10, clip_max_new_tokens=4096,
+            max_running_requests=10, max_new_tokens=128,
+            clip_max_new_tokens=4096,
             num_reserved_decode_tokens=0, init_new_token_ratio=0.01,
             min_new_token_ratio=0.01, ratio_decay_per_iter=0.0,
             page_size=1, retract_retry_margin=margin)
@@ -119,6 +121,18 @@ class TestRetryHysteresis(unittest.TestCase):
         d.handle(KvChunk(spec=spec, tokens=100, last=False, nbytes=0,
                          attempt=1), ctx)
         self.assertEqual(d.admitted[0].received, 100)
+
+    def test_offsets_use_declared_cap_not_actual_output(self):
+        # The admission estimate must not know the true output length:
+        # a request that will actually stop at 5 tokens still reserves
+        # against the configured max_new_tokens (128 here).
+        d = self._decode()
+        engine = Engine()
+        engine.register(d)
+        ctx = Context(engine, 0.0)
+        spec = RequestSpec(rid=0, input_tokens=100, output_tokens=5)
+        d.handle(BootstrapRequest(spec=spec, origin="p"), ctx)
+        self.assertAlmostEqual(d._offsets(), min(128, 4096) * 0.01)
 
 
 class TestDeterminism(unittest.TestCase):

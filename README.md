@@ -59,7 +59,8 @@ python -m unittest discover -s tests -t . -v
 ```
 
 字段校验：`arrival_ms`/`input`/`output` 为必填且非负；`cache_hit` 可选
-（默认 0）且不得超过 `input`。
+（默认 0）且不得超过 `input`。`output` 的语义是 EOS 实际出现的位置；
+真实生成还会被配置里的 `decode.max_new_tokens`（声明上限）截断。
 
 `examples/series_generate.py` 是一个现成的生成器：
 
@@ -107,7 +108,8 @@ TTFT/E2E 的 p95）。
                 "chunked_prefill_size": 8192 },
   "decode":   { "instances": 2, "pool_tokens": 200000, "watermark": 0.9,
                 "max_running_requests": 256, "iter_base_ms": 50,
-                "iter_slope_ms_per_req": 0.5, "clip_max_new_tokens": 4096,
+                "iter_slope_ms_per_req": 0.5, "max_new_tokens": 4096,
+                "clip_max_new_tokens": 4096,
                 "num_reserved_decode_tokens": 512,
                 "init_new_token_ratio": 0.9, "min_new_token_ratio": 0.5 },
   "transfer": { "bandwidth_gbps": 50, "base_latency_ms": 2,
@@ -130,12 +132,14 @@ TTFT/E2E 的 p95）。
 | `decode.max_running_requests` | 256 | 单实例最大并发请求数 |
 | `decode.iter_base_ms` | 50 | decode 迭代基础时延（batch=0） |
 | `decode.iter_slope_ms_per_req` | 0.5 | 每多一个并发请求增加的迭代时延 |
+| `decode.max_new_tokens` | 128 | 声明的输出上限：准入估算和生成截断都用它，对应 sglang `SamplingParams.max_new_tokens` 的默认值； trace 的 `output` 只是 EOS 落点，不参与估算 |
 | `decode.clip_max_new_tokens` | 4096 | 乐观准入中未来生成量估算的封顶 |
 | `decode.num_reserved_decode_tokens` | 512 | 每请求固定预留 token 数 |
 | `decode.init_new_token_ratio` | 0.9 | 准入估算的初始悲观系数 |
 | `decode.min_new_token_ratio` | 0.5 | 悲观系数下限（最乐观） |
 | `decode.ratio_decay_per_iter` | 0.01 | 每轮迭代的衰减量 |
 | `decode.page_size` | 16 | KV 页对齐粒度 |
+| `decode.retract_retry_margin` | 2.0 | retract 重试的准入余量倍数（封顶在准入上限，空池一定能再进） |
 | `decode.head_of_line_blocking` | true | bootstrap 队列是否队首阻塞 |
 | `transfer.bandwidth_gbps` | 50 | KV 传输带宽（GB/s，按每 P→D 通道） |
 | `transfer.base_latency_ms` | 2 | 单次传输基础时延 |
@@ -208,13 +212,18 @@ Event = (time_ms, priority, seq, target, message)
    算力约束），KV 边算边经传输通道发往 D；最后一个 chunk 发出后释放
    本端显存；
 5. **decode**：D 收齐 KV 后开始逐轮生成，每轮每请求 1 个 token，
-   轮时随并发数增长，直到生成满 `output`；释放全部显存，报
+   轮时随并发数增长，直到 `min(output, max_new_tokens)`——`output`
+   是 EOS 落点，`max_new_tokens` 是声明上限（对应 sglang 的
+   FINISH_LENGTH）；释放全部显存，报
    `DoneNotice`。与 sglang 一致，**首 token 在 prefill 前向结束时
    就已采样**，随最后一块 KV 送达 D——最后一块 chunk 到达的时刻
    即该请求的 **TTFT**；
 6. **retract（异常路径）**：若乐观准入放多了请求、实际占用超过物理
-   池容量，D 回撤最晚开始的请求（保留已生成 token，回 P 重做握手与
-   prefill），同时把准入估算调回悲观。
+   池容量，D 先回撤 KV 未收齐的请求（不损失 decode 进度，只浪费在途
+   prefill 算力），不够再回撤最晚开始 decode 的请求；被回撤的请求
+   保留已生成 token，回 P 中止本地工作后重做握手与 prefill，且重试
+   要求更大的头寸（`retract_retry_margin`）防止反复振荡；丢弃的
+   prefill 算力计入 `retract_rework_tokens`，同时准入估算调回悲观。
 
 ### Prefill 建模
 
@@ -240,10 +249,14 @@ Event = (time_ms, priority, seq, target, message)
   吞吐 ≈ `batch / iter_latency`，饱和点自然涌现——这是 decode 侧
   backpressure 的物理来源；
 - **乐观准入**：判断头寸时，除了真实占用，还为每个已准入请求虚拟
-  预留 `min(剩余生成量, clip_max_new_tokens) × new_token_ratio`；
+  预留 `min(max_new_tokens − 已生成, clip_max_new_tokens) ×
+  new_token_ratio`——与 sglang 的 `_get_running_request_total_token_offset`
+  一致，用的是声明上限而不是真实输出长度（系统无法预知 EOS）；
 - **new_token_ratio 反馈环**：每轮迭代衰减（变乐观，下限
   `min_new_token_ratio`），一旦发生 retract 立刻重置回初值（变悲观）；
-- **retract**：实际占用超过物理池时，回撤最晚开始 decode 的请求；
+- **retract**：实际占用超过物理池时，先回撤 KV 未收齐的请求（最新
+  grant 优先），再回撤最晚开始 decode 的请求；重试按
+  `retract_retry_margin` 倍头寸准入；
 - **并发上限**：`max_running_requests` 到顶后不再发放 Grant。
 
 ### KV 传输建模
@@ -287,7 +300,8 @@ pick(spec, prefills, decodes) -> (prefill_id, decode_id)
 | `first_kv` | 到达 → 首个 KV chunk 到达 D（握手 + 首批算力 + 传输） |
 | **TTFT** | 到达 → 最后一块 KV 到达 D（首 token 在 prefill 前向结束时采样，随其送达） |
 
-汇总输出：决策计数、retract 次数、完成数、平均/p95 的准入等待、上述
+汇总输出：决策计数、retract 次数与浪费的 prefill 算力
+（`retract_rework_tokens`）、完成数、平均/p95 的准入等待、上述
 两个口径、端到端时延、双池峰值利用率。
 
 ### 确定性
