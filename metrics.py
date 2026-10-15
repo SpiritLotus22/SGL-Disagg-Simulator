@@ -29,7 +29,8 @@ class MetricsCollector(Actor):
     def __init__(self) -> None:
         self.arrival_ms: dict[int, float] = {}
         self.grant_ms: dict[int, float] = {}
-        self.ttft_ms: dict[int, float] = {}
+        self.first_kv_ms: dict[int, float] = {}  # first KvChunk at decode
+        self.ttft_ms: dict[int, float] = {}      # last KvChunk at decode
         self.done_ms: dict[int, float] = {}
         self.decisions: dict[int, str] = {}
         self.reasons: dict[int, str] = {}
@@ -50,9 +51,14 @@ class MetricsCollector(Actor):
             self.grant_ms.setdefault(msg.spec.rid, now)
             self.decisions.setdefault(msg.spec.rid, ACCEPT)
         elif isinstance(msg, KvChunk) and ev.target.startswith("decode"):
-            if msg.spec.rid not in self.ttft_ms:
-                arr = self.arrival_ms.get(msg.spec.rid, now)
-                self.ttft_ms[msg.spec.rid] = now - arr
+            rid = msg.spec.rid
+            if rid not in self.first_kv_ms:
+                self.first_kv_ms[rid] = now
+            if msg.last:
+                # The first token is sampled at the end of the prefill
+                # forward pass and arrives with the final KV chunk, so the
+                # last chunk's arrival is the request's TTFT.
+                self.ttft_ms[rid] = now
         elif isinstance(msg, DoneNotice):
             self.done_ms[msg.spec.rid] = now
         elif isinstance(msg, RetractRetry):
@@ -81,11 +87,16 @@ class MetricsCollector(Actor):
         return xs[idx]
 
     def summary(self) -> dict:
-        waits = [self.grant_ms[r] - self.arrival_ms[r]
-                 for r in self.grant_ms if r in self.arrival_ms]
-        ttfts = list(self.ttft_ms.values())
-        e2e = [self.done_ms[r] - self.arrival_ms[r]
-               for r in self.done_ms if r in self.arrival_ms]
+        def rel(times):
+            return [times[r] - self.arrival_ms[r]
+                    for r in times if r in self.arrival_ms]
+
+        waits = rel(self.grant_ms)
+        first_kv = rel(self.first_kv_ms)
+        # TTFT: arrival -> last KV chunk at decode (the first token is
+        # sampled at the end of prefill and arrives with it)
+        ttfts = rel(self.ttft_ms)
+        e2e = rel(self.done_ms)
         decision_counts: dict[str, int] = defaultdict(int)
         for d in self.decisions.values():
             decision_counts[d] += 1
@@ -99,6 +110,7 @@ class MetricsCollector(Actor):
             "retracts": sum(self.retracts.values()),
             "completed": len(self.done_ms),
             "avg_wait_ms": statistics.fmean(waits) if waits else 0.0,
+            "avg_first_kv_ms": statistics.fmean(first_kv) if first_kv else 0.0,
             "avg_ttft_ms": statistics.fmean(ttfts) if ttfts else 0.0,
             "p95_ttft_ms": self._pct(ttfts, 0.95),
             "avg_e2e_ms": statistics.fmean(e2e) if e2e else 0.0,

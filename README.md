@@ -209,7 +209,9 @@ Event = (time_ms, priority, seq, target, message)
    本端显存；
 5. **decode**：D 收齐 KV 后开始逐轮生成，每轮每请求 1 个 token，
    轮时随并发数增长，直到生成满 `output`；释放全部显存，报
-   `DoneNotice`；
+   `DoneNotice`。与 sglang 一致，**首 token 在 prefill 前向结束时
+   就已采样**，随最后一块 KV 送达 D——最后一块 chunk 到达的时刻
+   即该请求的 **TTFT**；
 6. **retract（异常路径）**：若乐观准入放多了请求、实际占用超过物理
    池容量，D 回撤最晚开始的请求（保留已生成 token，回 P 重做握手与
    prefill），同时把准入估算调回悲观。
@@ -251,8 +253,7 @@ Event = (time_ms, priority, seq, target, message)
 - 每块 KV 的传输时延 = `base_latency_ms + 字节数 / 带宽`
   （字节数 = token 数 × `bytes_per_token_kb`）；
 - 通道是**串行化**的：一块传完才传下一块——这既建模了带宽竞争，
-  又保证 chunk 按序到达；
-- 首个 chunk 到达 D 的时刻即该请求的 TTFT，传输时延被自然计入。
+  又保证 chunk 按序到达。
 
 ### Router 与调度策略
 
@@ -275,10 +276,19 @@ pick(spec, prefills, decodes) -> (prefill_id, decode_id)
 ### 指标采集
 
 `metrics.py` 的 `MetricsCollector` 以两种被动方式工作：作为引擎观察者
-旁听每一次事件派发（得到到达、Grant、首 chunk、完成、retract 的时刻
-与双池用量采样）；作为 `metrics` actor 接收 `DecisionNotice`（硬拒
-决策）。它对仿真逻辑零干预。汇总输出：决策计数、retract 次数、完成数、
-平均/p95 的准入等待、TTFT、端到端时延、双池峰值利用率。
+旁听每一次事件派发（得到到达、Grant、chunk、完成、retract 的时刻与
+双池用量采样）；作为 `metrics` actor 接收 `DecisionNotice`（硬拒
+决策）。它对仿真逻辑零干预。
+
+首 token 之前的延迟拆成两个口径：
+
+| 指标 | 口径 |
+|---|---|
+| `first_kv` | 到达 → 首个 KV chunk 到达 D（握手 + 首批算力 + 传输） |
+| **TTFT** | 到达 → 最后一块 KV 到达 D（首 token 在 prefill 前向结束时采样，随其送达） |
+
+汇总输出：决策计数、retract 次数、完成数、平均/p95 的准入等待、上述
+两个口径、端到端时延、双池峰值利用率。
 
 ### 确定性
 
