@@ -67,6 +67,26 @@ class TestLifecycle(unittest.TestCase):
             summary["decisions"].get("REJECT_PREFILL_PRESSURE"), 1)
         self.assertEqual(summary["completed"], 11)
 
+    def test_generation_capped_at_max_new_tokens(self):
+        # The trace's output is where EOS lands; when it exceeds the
+        # declared cap, generation stops at the cap (sglang FINISH_LENGTH).
+        raw = [{"input": 100, "output": 5000, "cache_hit": 0,
+                "arrival_ms": 0}]
+        capped, _ = run_trace(raw, max_new_tokens=10,
+                              decode_iter_base_ms=1.0,
+                              decode_iter_slope_ms=0.0,
+                              prefill_tps=400_000,
+                              transfer_base_latency_ms=0.1)
+        uncapped, _ = run_trace(raw, max_new_tokens=100_000,
+                                decode_iter_base_ms=1.0,
+                                decode_iter_slope_ms=0.0,
+                                prefill_tps=400_000,
+                                transfer_base_latency_ms=0.1)
+        self.assertEqual(capped["completed"], 1)
+        # 10 iterations vs 5000 iterations at ~1ms each
+        self.assertLess(capped["avg_e2e_ms"], 500)
+        self.assertGreater(uncapped["avg_e2e_ms"], 5000)
+
 
 if __name__ == "__main__":
     unittest.main()

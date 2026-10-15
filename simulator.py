@@ -44,6 +44,7 @@ class SimConfig:
     max_running_requests: int = 256
     decode_iter_base_ms: float = 50.0
     decode_iter_slope_ms: float = 0.5
+    max_new_tokens: int = 128
     clip_max_new_tokens: int = 4_096
     num_reserved_decode_tokens: int = 512
     init_new_token_ratio: float = 0.9
@@ -91,6 +92,7 @@ class SimConfig:
             "decode_max_running_requests": "max_running_requests",
             "decode_iter_base_ms": "decode_iter_base_ms",
             "decode_iter_slope_ms_per_req": "decode_iter_slope_ms",
+            "decode_max_new_tokens": "max_new_tokens",
             "decode_clip_max_new_tokens": "clip_max_new_tokens",
             "decode_num_reserved_decode_tokens": "num_reserved_decode_tokens",
             "decode_init_new_token_ratio": "init_new_token_ratio",
@@ -169,7 +171,8 @@ def build(config: SimConfig, trace: Trace) -> Simulation:
     for did in decode_ids:
         decodes.append(DecodeInstance(
             did, config.decode_pool_tokens, config.decode_kv_watermark,
-            d_perf, config.max_running_requests, config.clip_max_new_tokens,
+            d_perf, config.max_running_requests, config.max_new_tokens,
+            config.clip_max_new_tokens,
             config.num_reserved_decode_tokens, config.init_new_token_ratio,
             config.min_new_token_ratio, config.ratio_decay_per_iter,
             config.page_size, config.retract_retry_margin,

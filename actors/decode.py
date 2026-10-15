@@ -5,7 +5,10 @@ Semantics (on a real, continuous time axis):
   * bootstrap prealloc is the FIRST gate: KV is truly reserved on the decode
     pool before any prefill compute happens;
   * optimistic admission: future decode tokens of admitted requests are
-    reserved virtually as min(remaining, CLIP) * new_token_ratio;
+    reserved virtually as min(max_new_tokens - generated, CLIP) *
+    new_token_ratio, where max_new_tokens is the serving-wide output cap
+    declared up front (mirroring SamplingParams.max_new_tokens, default
+    128) -- the true output length is never known in advance;
   * new_token_ratio decays per decode iteration (more optimistic) and resets
     to its initial value on every retraction (more pessimistic);
   * if actual usage exceeds the physical pool, requests are retracted back
@@ -19,7 +22,9 @@ Semantics (on a real, continuous time axis):
     request could never fit, even alone.
 
 Iteration rhythm comes from DecodePerf: every running request emits exactly
-1 token per iteration; iteration latency grows with batch size.
+1 token per iteration; iteration latency grows with batch size. A request
+finishes at min(output, max_new_tokens): the trace's output is where EOS
+lands, and max_new_tokens is the hard cap (sglang FINISH_LENGTH).
 """
 
 from __future__ import annotations
@@ -54,7 +59,8 @@ class _DReq:
 class DecodeInstance(Actor):
     def __init__(self, actor_id: str, pool_tokens: int, watermark: float,
                  perf: DecodePerf, max_running_requests: int,
-                 clip_max_new_tokens: int, num_reserved_decode_tokens: int,
+                 max_new_tokens: int, clip_max_new_tokens: int,
+                 num_reserved_decode_tokens: int,
                  init_new_token_ratio: float, min_new_token_ratio: float,
                  ratio_decay_per_iter: float, page_size: int,
                  retract_retry_margin: float = 2.0,
@@ -64,6 +70,7 @@ class DecodeInstance(Actor):
         self.limit = pool_tokens * watermark
         self.perf = perf
         self.max_running = max_running_requests
+        self.max_new_tokens = max_new_tokens
         self.clip = clip_max_new_tokens
         self.num_reserved = num_reserved_decode_tokens
         self.init_ratio = init_new_token_ratio
@@ -102,7 +109,7 @@ class DecodeInstance(Actor):
     def _offsets(self) -> float:
         total = 0.0
         for st in self.admitted.values():
-            remaining = st.spec.output_tokens - st.generated
+            remaining = self.max_new_tokens - st.generated
             total += min(remaining, self.clip) * self.ratio
         return total
 
@@ -112,7 +119,7 @@ class DecodeInstance(Actor):
             return "never_fits"
         if len(self.admitted) >= self.max_running:
             return "wait"
-        own_offset = (min(req.spec.output_tokens - req.generated_so_far,
+        own_offset = (min(self.max_new_tokens - req.generated_so_far,
                           self.clip) * self.ratio)
         allocatable = self.limit - self.d_used - self._offsets()
         need = required + own_offset
@@ -202,7 +209,9 @@ class DecodeInstance(Actor):
             st = self.admitted[rid]
             st.generated += 1
             st.charged += 1
-            if st.generated >= st.spec.output_tokens:
+            # EOS from the trace, hard-capped by the declared max_new_tokens
+            if st.generated >= min(st.spec.output_tokens,
+                                   self.max_new_tokens):
                 self._finish(st, ctx)
         self._retract_until_fits(ctx)
         self._rescan_wait_queue(ctx)
