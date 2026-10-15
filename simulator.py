@@ -50,6 +50,7 @@ class SimConfig:
     min_new_token_ratio: float = 0.5
     ratio_decay_per_iter: float = 0.01
     page_size: int = 16
+    retract_retry_margin: float = 2.0
     head_of_line_blocking: bool = True
 
     # KV transfer
@@ -96,6 +97,7 @@ class SimConfig:
             "decode_min_new_token_ratio": "min_new_token_ratio",
             "decode_ratio_decay_per_iter": "ratio_decay_per_iter",
             "decode_page_size": "page_size",
+            "decode_retract_retry_margin": "retract_retry_margin",
             "decode_head_of_line_blocking": "head_of_line_blocking",
             "transfer_bandwidth_gbps": "transfer_bandwidth_gbps",
             "transfer_base_latency_ms": "transfer_base_latency_ms",
@@ -170,7 +172,8 @@ def build(config: SimConfig, trace: Trace) -> Simulation:
             d_perf, config.max_running_requests, config.clip_max_new_tokens,
             config.num_reserved_decode_tokens, config.init_new_token_ratio,
             config.min_new_token_ratio, config.ratio_decay_per_iter,
-            config.page_size, config.head_of_line_blocking))
+            config.page_size, config.retract_retry_margin,
+            config.head_of_line_blocking))
 
     router = Router(config.context_len, config.prefill_pool_tokens,
                     prefill_ids, decode_ids,
