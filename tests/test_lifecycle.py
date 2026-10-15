@@ -20,10 +20,14 @@ class TestLifecycle(unittest.TestCase):
         self.assertEqual(summary["decisions"].get("ACCEPT"), 1)
         self.assertEqual(summary["completed"], 1)
         self.assertEqual(summary["retracts"], 0)
-        # prefill 32k tokens @40k tps = 800ms; first chunk (8192 tokens)
-        # lands after ~205ms compute + transfer; TTFT must sit in between
-        self.assertGreater(summary["avg_ttft_ms"], 150)
-        self.assertLess(summary["avg_ttft_ms"], 800)
+        # TTFT = arrival -> last KV chunk at decode: full prefill (32k
+        # @40k tps = 800ms) + final chunk transfer (~23ms)
+        self.assertGreater(summary["avg_ttft_ms"], 800)
+        self.assertLess(summary["avg_ttft_ms"], 1200)
+        # the first KV chunk arrives DURING prefill, long before TTFT
+        self.assertLess(summary["avg_first_kv_ms"], 400)
+        self.assertGreater(summary["avg_ttft_ms"],
+                           summary["avg_first_kv_ms"])
         # E2E = prefill + 100 decode iterations (~50ms each at batch 1)
         self.assertGreater(summary["avg_e2e_ms"], 5000)
 
@@ -32,16 +36,23 @@ class TestLifecycle(unittest.TestCase):
                 "arrival_ms": 0}]
         summary, _ = run_trace(raw)
         self.assertEqual(summary["completed"], 1)
-        # no prefill compute at all: TTFT is just transfer latency
+        # no prefill compute: cached KV streams at once, TTFT is just
+        # the transfer of a single chunk
         self.assertLess(summary["avg_ttft_ms"], 100)
+        self.assertEqual(summary["avg_ttft_ms"],
+                         summary["avg_first_kv_ms"])  # one chunk only
 
     def test_chunked_vs_oneshot(self):
         raw = [{"input": 32000, "output": 5, "cache_hit": 0,
                 "arrival_ms": 0}]
         chunked, _ = run_trace(raw)
         oneshot, _ = run_trace(raw, chunked_prefill_size=None)
-        # one-shot transfers everything at the end -> later TTFT
+        # both finish computing at the same time, but one-shot then has
+        # to ship the whole prompt in a single huge transfer -> later TTFT
         self.assertLess(chunked["avg_ttft_ms"], oneshot["avg_ttft_ms"])
+        # the difference is far more visible in the first-chunk latency
+        self.assertLess(chunked["avg_first_kv_ms"],
+                        oneshot["avg_first_kv_ms"] / 2)
 
     def test_example_trace(self):
         from pathlib import Path
