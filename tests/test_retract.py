@@ -1,9 +1,14 @@
-"""Retraction: when the optimistic estimate proves wrong, the newest
-request is pushed back, new_token_ratio resets, and everyone still finishes.
-Also: whole-run determinism on a fixed trace."""
+"""Retraction: when the optimistic estimate proves wrong, requests are
+pushed back to prefill (KV-incomplete ones first), retries must clear a
+larger headroom, and everyone still finishes. Also: whole-run determinism
+on a fixed trace."""
 
 import unittest
 
+from engine import Context, Engine
+from perf import DecodePerf
+from actors.decode import DecodeInstance
+from protocol import BootstrapRequest, KvChunk, RequestSpec
 from simulator import SimConfig, build
 from cli import parse_trace
 
@@ -45,6 +50,75 @@ class TestRetract(unittest.TestCase):
         decode = sim.engine.actors["decode-0"]
         self.assertGreaterEqual(decode.ratio, config.min_new_token_ratio)
         self.assertLessEqual(decode.ratio, config.init_new_token_ratio)
+
+    def test_inflight_request_is_retracted_first(self):
+        # A decodes while B is still prefilling. When A overruns the pool,
+        # B's prealloc is freed (not A's decode progress), B's partial
+        # prefill compute is accounted as rework, and both finish.
+        trace = parse_trace([
+            {"input": 10, "output": 2500, "cache_hit": 0, "arrival_ms": 0},
+            {"input": 800, "output": 50, "cache_hit": 0, "arrival_ms": 5},
+        ])
+        config = SimConfig(
+            decode_pool_tokens=3_000, decode_kv_watermark=1.0,
+            num_reserved_decode_tokens=0, page_size=1,
+            clip_max_new_tokens=4096,
+            decode_iter_base_ms=1.0, decode_iter_slope_ms=0.0,
+            init_new_token_ratio=0.01, min_new_token_ratio=0.01,
+            prefill_tps=100, transfer_base_latency_ms=0.1,
+        )
+        sim = build(config, trace)
+        summary = sim.run()
+        self.assertEqual(sim.collector.retracts.get(0, 0), 0)  # A untouched
+        self.assertGreater(sim.collector.retracts.get(1, 0), 0)  # B pushed back
+        self.assertGreater(summary["retract_rework_tokens"], 0)
+        self.assertEqual(summary["completed"], 2)
+
+
+class TestRetryHysteresis(unittest.TestCase):
+    """A retracted retry needs retract_retry_margin x its prealloc in
+    headroom (capped at the pool limit) before it is granted again."""
+
+    def _decode(self, margin=2.0):
+        return DecodeInstance(
+            "decode-0", pool_tokens=2_000, watermark=1.0,
+            perf=DecodePerf(base_ms=1.0, slope_ms=0.0),
+            max_running_requests=10, clip_max_new_tokens=4096,
+            num_reserved_decode_tokens=0, init_new_token_ratio=0.01,
+            min_new_token_ratio=0.01, ratio_decay_per_iter=0.0,
+            page_size=1, retract_retry_margin=margin)
+
+    def test_retry_needs_extra_headroom(self):
+        d = self._decode()
+        d.d_used = 1_000  # allocatable = 1000
+        spec = RequestSpec(rid=0, input_tokens=600, output_tokens=10)
+        fresh = BootstrapRequest(spec=spec, origin="p")
+        retry = BootstrapRequest(spec=spec, origin="p", retracted=True,
+                                 attempt=1)
+        self.assertEqual(d._verdict(fresh), "accept")   # needs ~600
+        self.assertEqual(d._verdict(retry), "wait")     # needs 1200
+
+    def test_margin_capped_at_limit_so_retry_eventually_fits(self):
+        d = self._decode(margin=100.0)
+        spec = RequestSpec(rid=0, input_tokens=600, output_tokens=10)
+        retry = BootstrapRequest(spec=spec, origin="p", retracted=True,
+                                 attempt=1)
+        # empty pool: the cap keeps the requirement at the pool limit
+        self.assertEqual(d._verdict(retry), "accept")
+
+    def test_stale_chunk_dropped_after_retry(self):
+        d = self._decode()
+        engine = Engine()
+        engine.register(d)
+        ctx = Context(engine, 0.0)
+        spec = RequestSpec(rid=0, input_tokens=600, output_tokens=10)
+        d.handle(BootstrapRequest(spec=spec, origin="p", attempt=1), ctx)
+        d.handle(KvChunk(spec=spec, tokens=100, last=False, nbytes=0,
+                         attempt=0), ctx)  # from the retracted attempt
+        self.assertEqual(d.admitted[0].received, 0)
+        d.handle(KvChunk(spec=spec, tokens=100, last=False, nbytes=0,
+                         attempt=1), ctx)
+        self.assertEqual(d.admitted[0].received, 100)
 
 
 class TestDeterminism(unittest.TestCase):

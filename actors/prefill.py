@@ -13,8 +13,9 @@ Lifecycle of one request here:
   BootstrapWait        -> decode side is full; nothing to do (the decode
                           node holds the queue and will grant later)
   BootstrapReject      -> hard reject, forward the decision to metrics
-  RetractRetry         -> decode pushed the request back; redo the handshake
-                          with the same decode node (generated tokens kept)
+  RetractRetry         -> decode pushed the request back; abort any prefill
+                          work still in flight, then redo the handshake with
+                          the same decode node (generated tokens kept)
 
 Compute model: every tick (PrefillPerf.tick_ms), the throughput budget
 (tps * tick) is shared fairly across active requests.
@@ -27,7 +28,7 @@ from perf import PrefillPerf, TransferChannel
 from protocol import (
     AssignPrefill, BootstrapGrant, BootstrapReject, BootstrapRequest,
     BootstrapWait, DecisionNotice, Heartbeat, KvChunk, PrefillTick,
-    RetractRetry,
+    RetractRetry, RetractWaste,
 )
 
 METRICS_ID = "metrics"
@@ -35,12 +36,15 @@ ROUTER_ID = "router"
 
 
 class _PReq:
-    __slots__ = ("spec", "decode_id", "generated_so_far", "prefilled", "sent")
+    __slots__ = ("spec", "decode_id", "generated_so_far", "prefilled", "sent",
+                 "attempt")
 
-    def __init__(self, spec, decode_id: str, generated_so_far: int = 0):
+    def __init__(self, spec, decode_id: str, generated_so_far: int = 0,
+                 attempt: int = 0):
         self.spec = spec
         self.decode_id = decode_id
         self.generated_so_far = generated_so_far
+        self.attempt = attempt
         self.prefilled = 0.0   # computed (uncached) tokens
         self.sent = 0.0        # KV tokens already shipped (cached + computed)
 
@@ -55,6 +59,7 @@ class PrefillInstance(Actor):
         self.perf = perf
         self.bytes_per_token = bytes_per_token
         self.pending: dict[int, str] = {}  # rid -> decode_id, in bootstrap
+        self.attempts: dict[int, int] = {}  # rid -> handshake round
         self.waiting: list[_PReq] = []     # granted, awaiting pool room
         self.active: list[_PReq] = []
         self.pool_used = 0
@@ -64,13 +69,16 @@ class PrefillInstance(Actor):
 
     def handle(self, message, ctx: Context) -> None:
         if isinstance(message, AssignPrefill):
-            self.pending[message.spec.rid] = message.decode_id
+            rid = message.spec.rid
+            self.pending[rid] = message.decode_id
             ctx.emit(message.decode_id, BootstrapRequest(
-                spec=message.spec, origin=self.actor_id))
+                spec=message.spec, origin=self.actor_id,
+                attempt=self.attempts.get(rid, 0)))
         elif isinstance(message, BootstrapGrant):
             decode_id = self.pending.pop(message.spec.rid)
             self.waiting.append(_PReq(message.spec, decode_id,
-                                      message.generated_so_far))
+                                      message.generated_so_far,
+                                      message.attempt))
             self._promote(ctx)
         elif isinstance(message, BootstrapWait):
             pass  # backpressure: the decode node queues us; just wait
@@ -80,17 +88,44 @@ class PrefillInstance(Actor):
                 rid=message.spec.rid, decision="REJECT_DECODE_KV",
                 reason=message.reason))
         elif isinstance(message, RetractRetry):
-            # Redo the handshake with the same decode node; generated
-            # tokens are preserved on the request.
-            self.pending[message.spec.rid] = message.decode_id
-            ctx.emit(message.decode_id, BootstrapRequest(
-                spec=message.spec, origin=self.actor_id,
-                generated_so_far=message.generated_so_far))
+            self._on_retract(message, ctx)
         elif isinstance(message, PrefillTick):
             self._tick_scheduled = False
             self._on_tick(ctx)
         else:
             raise TypeError(f"PrefillInstance got unexpected {type(message)}")
+
+    # -- retraction ------------------------------------------------------------
+
+    def _drop(self, rid: int):
+        """Remove a retracted request from the local queues, if present."""
+        for i, st in enumerate(self.waiting):
+            if st.spec.rid == rid:
+                return self.waiting.pop(i)
+        for i, st in enumerate(self.active):
+            if st.spec.rid == rid:
+                self.pool_used -= st.spec.input_tokens
+                return self.active.pop(i)
+        return None
+
+    def _on_retract(self, message: RetractRetry, ctx: Context) -> None:
+        """Abort any local work, account the waste, redo the handshake."""
+        rid = message.spec.rid
+        st = self._drop(rid)
+        # Work thrown away: partial compute if still prefilling, otherwise
+        # the whole extend (finished or untouched, it will be recomputed).
+        waste = st.prefilled if st is not None else message.spec.extend_len
+        if waste > 0:
+            ctx.emit(METRICS_ID, RetractWaste(rid=rid, tokens=waste))
+        attempt = self.attempts.get(rid, 0) + 1
+        self.attempts[rid] = attempt
+        self.pending[rid] = message.decode_id
+        ctx.emit(message.decode_id, BootstrapRequest(
+            spec=message.spec, origin=self.actor_id,
+            generated_so_far=message.generated_so_far,
+            retracted=True, attempt=attempt))
+        if st is not None:
+            self._promote(ctx)  # the dropped request freed pool room
 
     # -- prefill scheduling --------------------------------------------------
 
@@ -150,7 +185,7 @@ class PrefillInstance(Actor):
         delay = self.channels[st.decode_id].delivery_delay_ms(ctx.now, nbytes)
         st.sent += tokens
         ctx.emit(st.decode_id, KvChunk(spec=st.spec, tokens=tokens, last=last,
-                                       nbytes=nbytes),
+                                       nbytes=nbytes, attempt=st.attempt),
                  delay_ms=delay)
 
     # -- helpers --------------------------------------------------------------

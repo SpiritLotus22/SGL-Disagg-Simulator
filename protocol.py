@@ -58,6 +58,8 @@ class BootstrapRequest:
     spec: RequestSpec
     origin: str  # prefill actor id, for the reply
     generated_so_far: int = 0  # >0 only on retract retry
+    retracted: bool = False    # True when this is a retry after retraction
+    attempt: int = 0           # handshake round; stale KV chunks are dropped
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,7 @@ class BootstrapGrant:
 
     spec: RequestSpec
     generated_so_far: int = 0
+    attempt: int = 0
 
 
 @dataclass(frozen=True)
@@ -93,6 +96,7 @@ class KvChunk:
     tokens: int
     last: bool
     nbytes: float
+    attempt: int = 0  # chunks from an older attempt arrive stale, drop them
 
 
 # --- decode -> prefill / router ----------------------------------------------
@@ -100,11 +104,20 @@ class KvChunk:
 @dataclass(frozen=True)
 class RetractRetry:
     """Optimistic admission proved wrong: request is pushed back to prefill.
-    It keeps its generated tokens and must redo bootstrap + prefill."""
+    It keeps its generated tokens and must redo bootstrap + prefill. If the
+    request was still prefilling, the prefill node aborts that work."""
 
     spec: RequestSpec
     generated_so_far: int
     decode_id: str  # the retracting instance; the retry goes back there
+
+
+@dataclass(frozen=True)
+class RetractWaste:
+    """Prefill compute thrown away by one retraction, for metrics."""
+
+    rid: int
+    tokens: float
 
 
 @dataclass(frozen=True)

@@ -8,9 +8,13 @@ Semantics (on a real, continuous time axis):
     reserved virtually as min(remaining, CLIP) * new_token_ratio;
   * new_token_ratio decays per decode iteration (more optimistic) and resets
     to its initial value on every retraction (more pessimistic);
-  * if actual usage exceeds the physical pool, the most recently started
-    request is retracted back to its prefill node (keeps generated tokens,
-    redoes the handshake and prefill);
+  * if actual usage exceeds the physical pool, requests are retracted back
+    to their prefill node (KV-incomplete requests first, then the most
+    recently started one); they keep generated tokens and redo the
+    handshake and prefill;
+  * a retracted retry must clear a larger headroom (retract_retry_margin,
+    capped at the pool limit) before it is granted again, so a request is
+    not retracted over and over by a still-full pool;
   * waiting is backpressure, never a rejection; hard rejects only when the
     request could never fit, even alone.
 
@@ -39,6 +43,8 @@ class _DReq:
     origin: str
     prealloc: int
     generated: int
+    attempt: int
+    grant_ms: float
     received: int = 0
     charged: int = 0        # generated tokens currently occupying the pool
     kv_complete: bool = False
@@ -51,6 +57,7 @@ class DecodeInstance(Actor):
                  clip_max_new_tokens: int, num_reserved_decode_tokens: int,
                  init_new_token_ratio: float, min_new_token_ratio: float,
                  ratio_decay_per_iter: float, page_size: int,
+                 retract_retry_margin: float = 2.0,
                  head_of_line_blocking: bool = True):
         self.actor_id = actor_id
         self.pool_tokens = pool_tokens
@@ -63,6 +70,7 @@ class DecodeInstance(Actor):
         self.min_ratio = min_new_token_ratio
         self.ratio_decay = ratio_decay_per_iter
         self.page_size = page_size
+        self.retry_margin = retract_retry_margin
         self.hol_blocking = head_of_line_blocking
 
         self.ratio = init_new_token_ratio
@@ -107,7 +115,13 @@ class DecodeInstance(Actor):
         own_offset = (min(req.spec.output_tokens - req.generated_so_far,
                           self.clip) * self.ratio)
         allocatable = self.limit - self.d_used - self._offsets()
-        if required + own_offset <= allocatable:
+        need = required + own_offset
+        if req.retracted:
+            # A retracted request re-entering a still-busy pool would likely
+            # be retracted again, so demand extra headroom. The cap keeps an
+            # empty pool able to grant any request, so retries always finish.
+            need = min(required * self.retry_margin + own_offset, self.limit)
+        if need <= allocatable:
             return "accept"
         return "wait"
 
@@ -116,7 +130,12 @@ class DecodeInstance(Actor):
         if verdict == "accept":
             self._grant(req, ctx)
         elif verdict == "wait":
-            self.wait_queue.append(req)
+            # Retries queue ahead of fresh requests: their rework is already
+            # spent, so they are served first once headroom appears.
+            if req.retracted:
+                self.wait_queue.appendleft(req)
+            else:
+                self.wait_queue.append(req)
             ctx.emit(req.origin, BootstrapWait(spec=req.spec))
         else:
             required = self._required(req.spec)
@@ -131,9 +150,10 @@ class DecodeInstance(Actor):
         self.d_used += required
         self.admitted[req.spec.rid] = _DReq(
             spec=req.spec, origin=req.origin, prealloc=required,
-            generated=req.generated_so_far)
+            generated=req.generated_so_far, attempt=req.attempt,
+            grant_ms=ctx.now)
         ctx.emit(req.origin, BootstrapGrant(spec=req.spec,
-                 generated_so_far=req.generated_so_far))
+                 generated_so_far=req.generated_so_far, attempt=req.attempt))
 
     def _rescan_wait_queue(self, ctx: Context) -> None:
         blocked = False
@@ -153,8 +173,8 @@ class DecodeInstance(Actor):
 
     def _on_chunk(self, msg: KvChunk, ctx: Context) -> None:
         st = self.admitted.get(msg.spec.rid)
-        if st is None:
-            return  # request was retracted before this chunk arrived
+        if st is None or msg.attempt != st.attempt:
+            return  # retracted before this chunk arrived, or re-granted since
         st.received += msg.tokens
         if msg.last and not st.kv_complete:
             st.kv_complete = True
@@ -196,13 +216,28 @@ class DecodeInstance(Actor):
         ctx.emit(ROUTER_ID, DoneNotice(spec=st.spec),
                  priority=PRIORITY_RELEASE)
 
+    def _pick_victim(self) -> int | None:
+        """Choose who to retract. Requests still waiting for their KV come
+        first: freeing their prealloc costs no decode progress, only the
+        prefill work in flight. Newest first in both groups."""
+        inflight = [rid for rid, st in self.admitted.items()
+                    if not st.kv_complete]
+        if inflight:
+            return max(inflight, key=lambda r: self.admitted[r].grant_ms)
+        if self.running:
+            return max(self.running,
+                       key=lambda r: self.admitted[r].decode_start_ms)
+        return None
+
     def _retract_until_fits(self, ctx: Context) -> None:
         retracted = False
-        while self.d_used > self.pool_tokens and self.running:
-            victim_rid = max(self.running,
-                             key=lambda r: self.admitted[r].decode_start_ms)
+        while self.d_used > self.pool_tokens:
+            victim_rid = self._pick_victim()
+            if victim_rid is None:
+                break
             victim = self.admitted.pop(victim_rid)
-            self.running.remove(victim_rid)
+            if victim.kv_complete:
+                self.running.remove(victim_rid)
             self.d_used -= victim.prealloc + victim.charged
             ctx.emit(victim.origin, RetractRetry(
                 spec=victim.spec, generated_so_far=victim.generated,

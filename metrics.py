@@ -19,7 +19,7 @@ from collections import defaultdict
 from engine import Actor, Context, Event
 from protocol import (
     ACCEPT, BootstrapGrant, DecisionNotice, DoneNotice, KvChunk,
-    RetractRetry, RouteRequest,
+    RetractRetry, RetractWaste, RouteRequest,
 )
 
 
@@ -35,6 +35,8 @@ class MetricsCollector(Actor):
         self.decisions: dict[int, str] = {}
         self.reasons: dict[int, str] = {}
         self.retracts: dict[int, int] = defaultdict(int)
+        self.rework_tokens: float = 0.0   # prefill compute lost to retracts
+        self.attempts: dict[int, int] = {}  # rid -> current handshake round
         self.samples: list[tuple[float, int, int]] = []  # now, p_used, d_used
         self._actors = ()
 
@@ -50,15 +52,22 @@ class MetricsCollector(Actor):
         elif isinstance(msg, BootstrapGrant):
             self.grant_ms.setdefault(msg.spec.rid, now)
             self.decisions.setdefault(msg.spec.rid, ACCEPT)
+            self.attempts[msg.spec.rid] = msg.attempt
+            if msg.attempt > 0:
+                # re-arm: only chunks of the new attempt count from here
+                self.first_kv_ms.pop(msg.spec.rid, None)
         elif isinstance(msg, KvChunk) and ev.target.startswith("decode"):
             rid = msg.spec.rid
-            if rid not in self.first_kv_ms:
-                self.first_kv_ms[rid] = now
-            if msg.last:
-                # The first token is sampled at the end of the prefill
-                # forward pass and arrives with the final KV chunk, so the
-                # last chunk's arrival is the request's TTFT.
-                self.ttft_ms[rid] = now
+            if msg.attempt != self.attempts.get(rid, 0):
+                pass  # stale chunk from before a retraction
+            else:
+                if rid not in self.first_kv_ms:
+                    self.first_kv_ms[rid] = now
+                if msg.last:
+                    # The first token is sampled at the end of the prefill
+                    # forward pass and arrives with the final KV chunk, so
+                    # the last chunk's arrival is the request's TTFT.
+                    self.ttft_ms[rid] = now
         elif isinstance(msg, DoneNotice):
             self.done_ms[msg.spec.rid] = now
         elif isinstance(msg, RetractRetry):
@@ -73,6 +82,8 @@ class MetricsCollector(Actor):
         if isinstance(message, DecisionNotice):
             self.decisions[message.rid] = message.decision
             self.reasons[message.rid] = message.reason
+        elif isinstance(message, RetractWaste):
+            self.rework_tokens += message.tokens
         else:
             raise TypeError(f"MetricsCollector got unexpected {type(message)}")
 
@@ -108,6 +119,7 @@ class MetricsCollector(Actor):
             "requests": len(self.arrival_ms),
             "decisions": dict(decision_counts),
             "retracts": sum(self.retracts.values()),
+            "retract_rework_tokens": self.rework_tokens,
             "completed": len(self.done_ms),
             "avg_wait_ms": statistics.fmean(waits) if waits else 0.0,
             "avg_first_kv_ms": statistics.fmean(first_kv) if first_kv else 0.0,
