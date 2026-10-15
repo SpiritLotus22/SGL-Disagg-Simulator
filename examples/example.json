@@ -1,0 +1,14 @@
+[
+  { "arrival_ms": 0,    "input": 32000,  "cache_hit": 0,      "output": 2048 },
+  { "arrival_ms": 400,  "input": 32000,  "cache_hit": 16000,  "output": 2048 },
+  { "arrival_ms": 900,  "input": 64000,  "cache_hit": 0,      "output": 4096 },
+  { "arrival_ms": 1600, "input": 32000,  "cache_hit": 32000,  "output": 1024 },
+  { "arrival_ms": 2200, "input": 140000, "cache_hit": 0,      "output": 2048 },
+  { "arrival_ms": 2900, "input": 125000, "cache_hit": 125000, "output": 2048 },
+  { "arrival_ms": 3500, "input": 48000,  "cache_hit": 0,      "output": 4096 },
+  { "arrival_ms": 4300, "input": 32000,  "cache_hit": 8000,   "output": 2048 },
+  { "arrival_ms": 5000, "input": 16000,  "cache_hit": 0,      "output": 512  },
+  { "arrival_ms": 5600, "input": 64000,  "cache_hit": 64000,  "output": 1024 },
+  { "arrival_ms": 6100, "input": 32000,  "cache_hit": 0,      "output": 2048 },
+  { "arrival_ms": 6800, "input": 32000,  "cache_hit": 24000,  "output": 2048 }
+]
