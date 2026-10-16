@@ -9,7 +9,7 @@ sides.
 from __future__ import annotations
 
 from engine import Actor, Context
-from policies.base import DecodeView, Policy, PoolView
+from policies.base import DecodeView, Policy, PrefillView
 from protocol import (
     REJECT_PREFILL_PRESSURE, AssignPrefill, DecisionNotice, DoneNotice,
     DecodeHeartbeat, PrefillHeartbeat, RouteRequest,
@@ -29,8 +29,8 @@ class Router(Actor):
         self.prefill_ids = sorted(prefill_ids)
         self.decode_ids = sorted(decode_ids)
         self.policy = policy
-        self.prefill_views: dict[str, PoolView] = {
-            pid: PoolView(pid, 0, 0) for pid in self.prefill_ids
+        self.prefill_views: dict[str, PrefillView] = {
+            pid: PrefillView(pid, 0, 0) for pid in self.prefill_ids
         }
         self.decode_views: dict[str, DecodeView] = {
             did: DecodeView(did, 0, 0, 0) for did in self.decode_ids
@@ -40,7 +40,7 @@ class Router(Actor):
         if isinstance(message, RouteRequest):
             self._route(message.spec, ctx)
         elif isinstance(message, PrefillHeartbeat):
-            self.prefill_views[message.prefill_id] = PoolView(
+            self.prefill_views[message.prefill_id] = PrefillView(
                 message.prefill_id, message.queued, message.active_tokens
             )
         elif isinstance(message, DecodeHeartbeat):

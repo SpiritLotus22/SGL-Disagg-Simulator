@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from policies.base import DecodeView, PoolView
+from policies.base import DecodeView, PrefillView
 from protocol import RequestSpec
 
 
@@ -11,7 +11,7 @@ class RoundRobin:
         self._next_p = 0
         self._next_d = 0
 
-    def pick(self, spec: RequestSpec, prefills: list[PoolView],
+    def pick(self, spec: RequestSpec, prefills: list[PrefillView],
              decodes: list[DecodeView]) -> tuple[str, str]:
         p = prefills[self._next_p % len(prefills)]
         d = decodes[self._next_d % len(decodes)]
