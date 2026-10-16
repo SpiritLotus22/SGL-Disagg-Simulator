@@ -63,7 +63,7 @@ class SimConfig:
     # each kind needs an explicit opt-in via the scenario's trace section
     trace_print_prefill_tick: bool = False
     trace_print_decode_tick: bool = False
-    trace_print_heartbeat: bool = False
+    trace_print_prefill_heartbeat: bool = False
     trace_print_decode_heartbeat: bool = False
 
     @classmethod
@@ -114,7 +114,7 @@ class SimConfig:
             "context_len": "context_len",
             "trace_print_prefill_tick": "trace_print_prefill_tick",
             "trace_print_decode_tick": "trace_print_decode_tick",
-            "trace_print_heartbeat": "trace_print_heartbeat",
+            "trace_print_prefill_heartbeat": "trace_print_prefill_heartbeat",
             "trace_print_decode_heartbeat": "trace_print_decode_heartbeat",
         }
         kwargs = {}

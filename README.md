@@ -148,7 +148,7 @@ TTFT/E2E 的 p95）。
 | `transfer.bytes_per_token_kb` | 128 | 每 token 的 KV 字节数 |
 | `trace.print_prefill_tick` | false | `--trace` 输出是否包含 prefill 调度 tick |
 | `trace.print_decode_tick` | false | 同上，decode 迭代 tick |
-| `trace.print_heartbeat` | false | 同上，P 侧心跳 |
+| `trace.print_prefill_heartbeat` | false | 同上，P 侧心跳 |
 | `trace.print_decode_heartbeat` | false | 同上，D 侧心跳 |
 | `context_len` | 131072 | prompt 硬上限（顶层字段） |
 
@@ -197,7 +197,7 @@ Event = (time_ms, priority, seq, target, message)
 | `RetractRetry` | D → P | 显存超支，请求回炉重做 |
 | `RetractWaste` | P → metrics | 一次回撤丢弃的 prefill 算力 |
 | `DoneNotice` | D → Router | 请求完成 |
-| `Heartbeat` / `DecodeHeartbeat` | P/D → Router | 负载视图上报 |
+| `PrefillHeartbeat` / `DecodeHeartbeat` | P/D → Router | 负载视图上报 |
 | `DecisionNotice` | 任意 → metrics | 不产生其他流量的硬决策 |
 
 这套协议的形状与 sglang 的 PD 分离实现对应：bootstrap 握手对应
