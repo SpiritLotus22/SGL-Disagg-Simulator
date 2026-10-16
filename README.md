@@ -18,6 +18,7 @@ router 调度、prefill 计算、KV 跨节点传输、decode 逐轮生成、显�
   - [日程表：事件的排序与重放](#日程表事件的排序与重放)
   - [角色与消息协议](#角色与消息协议)
   - [一条请求的完整生命周期](#一条请求的完整生命周期)
+  - [准入控制链](#准入控制链)
   - [Prefill 建模](#prefill-建模)
   - [Decode 建模](#decode-建模)
   - [KV 传输建模](#kv-传输建模)
@@ -100,7 +101,7 @@ TTFT/E2E 的 p95）。
 
 场景文件（JSON）只描述**系统**——实例数量、池容量、速率、调度策略。
 `seed` 和 trace 输入是运行参数，只能走命令行；场景里出现任何无法识别
-的键（包括笔误）会打印警告并忽略，不会中断运行。完整示例：
+的键（包括笔误）会打印警告并忽略，不会中断运行。示例：
 
 ```json
 {
@@ -219,7 +220,9 @@ Event = (time_ms, priority, seq, target, message)
    `required = ceil_page(input) + num_reserved_decode_tokens`：
    - `required > 池容量 × 水位`（独占也放不下）→ 硬拒 `REJECT_DECODE_KV`；
    - 余量够 → **真实预留**这部分显存，回 `BootstrapGrant`；
-   - 暂时不够 → 进 D 的等待队列（backpressure，等待不是拒绝）；
+   - 暂时不够 → 进 D 的等待队列（backpressure；若开了
+     `max_bootstrap_wait_ms` 且预估等待超预算，则直接打回，见准入
+     控制链）；
 4. **prefill**：P 收到 Grant 后开始计算（受 prefill 池显存闸门和共享
    算力约束），KV 边算边经传输通道发往 D；最后一个 chunk 发出后释放
    本端显存；
@@ -254,7 +257,7 @@ Event = (time_ms, priority, seq, target, message)
    请求的释放时刻按自适应生成长度估算（默认 640 token，完成请求满
    `wait_est_window` 个后取窗口内 p90，封顶
    `min(clip_max_new_tokens, max_new_tokens)`；只用于预测，准入账本
-   仍按声明上限记账），到预算时刻仍凑不够头寸 → 打回
+   仍按声明上限记账），到预算时刻仍凑不够余量 → 打回
    `REJECT_DECODE_WAIT`；
 3. **Prefill 池闸门**（`PrefillInstance._promote`）：拿到 Grant 后，
    在途 prompt 总量不得超过 `prefill.pool_tokens`，超过则排队等池
@@ -263,12 +266,14 @@ Event = (time_ms, priority, seq, target, message)
    `BootstrapAbort` 让 D 释放已预留的显存。
 
 预估等待的打回只针对首次到达的请求；retract 重试豁免（它们的重做
-算力已经花掉，且重试头寸机制保证最终能进）。
+算力已经花掉，且重试余量机制保证最终能进）。
 
-默认三关全部是 backpressure 而非拒绝：除了两种硬拒，请求只会排队，
-不会被丢弃；两个等待预算默认关闭（`null`），打开后预估排队过久的
-请求被快速打回，把无界的 TTFT 排队换成显式失败。乐观估计出错时由
-retract 兜底（见生命周期第 6 步）。
+四个拒绝码一览：`REJECT_PREFILL_PRESSURE`（router 入口硬拒）、
+`REJECT_DECODE_KV`（D 池独占也放不下的硬拒）、`REJECT_DECODE_WAIT`
+/ `REJECT_PREFILL_WAIT`（预估等待超预算打回，默认关闭）。不开预算
+时三关全部是 backpressure：请求只会排队，不会被丢弃；打开后把无界
+的 TTFT 排队换成显式失败。乐观估计出错时由 retract 兜底（见生命
+周期第 6 步）。
 
 ### Prefill 建模
 
@@ -279,7 +284,8 @@ retract 兜底（见生命周期第 6 步）。
 - 多请求并发时**共享吞吐**：每个调度 tick（默认 10ms）里，本 tick 的
   算力配额（`tps × tick`）在所有活跃请求间均分；
 - 显存闸门：在途 prompt 总量不得超过 `prefill.pool_tokens`，超过则
-  排队等待；
+  排队等待（可选：预估等待超 `max_queue_wait_ms` 则打回，见准入
+  控制链第 3 关）；
 - 切块传输：每攒够 `chunked_prefill_size` 个 token 就发一个 `KvChunk`；
   设为 `null` 时退化为整条算完一次性发送。
 
@@ -302,7 +308,10 @@ retract 兜底（见生命周期第 6 步）。
 - **retract**：实际占用超过物理池时，先回撤 KV 未收齐的请求（最新
   grant 优先），再回撤最晚开始 decode 的请求；重试按
   `retract_retry_margin` 倍余量准入；
-- **并发上限**：`max_running_requests` 到顶后不再发放 Grant。
+- **并发上限**：`max_running_requests` 到顶后不再发放 Grant；
+- **等待预算**（可选，`max_bootstrap_wait_ms`）：bootstrap 排队前预估
+  等待，超预算直接打回；释放时刻用自适应生成长度估算——见准入控制链
+  第 2 关。
 
 ### KV 传输建模
 
@@ -335,8 +344,8 @@ pick(spec, prefills, decodes) -> (prefill_id, decode_id)
 
 `metrics.py` 的 `MetricsCollector` 以两种被动方式工作：作为引擎观察者
 旁听每一次事件派发（得到到达、Grant、chunk、完成、retract 的时刻与
-双池用量采样）；作为 `metrics` actor 接收 `DecisionNotice`（硬拒
-决策）。它对仿真逻辑零干预。
+双池用量采样）；作为 `metrics` actor 接收 `DecisionNotice`（拒绝
+决策）与 `RetractWaste`（回撤丢弃的算力）。它对仿真逻辑零干预。
 
 首 token 之前的延迟拆成两个口径：
 
@@ -371,7 +380,7 @@ sim_async/
 ├── scenarios/           # 场景配置（two_p_two_d / four_p_two_d）
 ├── examples/            # example.json、series_generate.py、time-series.json
 ├── traces/              # --trace 的事件流输出
-└── tests/               # 测试套件（39 个用例）
+└── tests/               # 测试套件（56 个用例）
 ```
 
 ## 待改进
