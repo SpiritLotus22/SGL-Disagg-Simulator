@@ -175,5 +175,41 @@ class TestPrefillWaitBudget(unittest.TestCase):
         self.assertNotIn(0, d.admitted)
 
 
+class TestWaitEstimate(unittest.TestCase):
+    """Adaptive output-length estimate: fixed default until the completion
+    window fills, then the window's p90, capped by clip/max_new_tokens."""
+
+    def _decode(self):
+        return DecodeInstance(
+            "decode-0", pool_tokens=100_000, watermark=1.0,
+            perf=DecodePerf(base_ms=1.0, slope_ms=0.0),
+            max_running_requests=100, max_new_tokens=4096,
+            clip_max_new_tokens=4096, num_reserved_decode_tokens=0,
+            init_new_token_ratio=0.9, min_new_token_ratio=0.5,
+            ratio_decay_per_iter=0.01, page_size=1,
+            wait_est_default_tokens=640, wait_est_window=100)
+
+    def test_default_before_window_fills(self):
+        d = self._decode()
+        d._output_window.extend([10] * 99)
+        self.assertEqual(d._est_output_tokens(), 640)
+
+    def test_p90_after_window_fills(self):
+        d = self._decode()
+        d._output_window.extend([100] * 90 + [2000] * 10)
+        # sorted[90] is the first element of the top decile
+        self.assertEqual(d._est_output_tokens(), 2000)
+
+    def test_capped_by_clip(self):
+        d = self._decode()
+        d._output_window.extend([100_000] * 100)
+        self.assertEqual(d._est_output_tokens(), 4096)
+
+    def test_capped_by_max_new_tokens(self):
+        d = self._decode()
+        d.max_new_tokens = 128
+        self.assertEqual(d._est_output_tokens(), 128)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -66,7 +66,9 @@ class DecodeInstance(Actor):
                  ratio_decay_per_iter: float, page_size: int,
                  retract_retry_margin: float = 2.0,
                  head_of_line_blocking: bool = True,
-                 max_bootstrap_wait_ms: float | None = None):
+                 max_bootstrap_wait_ms: float | None = None,
+                 wait_est_default_tokens: int = 640,
+                 wait_est_window: int = 100):
         self.actor_id = actor_id
         self.pool_tokens = pool_tokens
         self.limit = pool_tokens * watermark
@@ -82,6 +84,9 @@ class DecodeInstance(Actor):
         self.retry_margin = retract_retry_margin
         self.hol_blocking = head_of_line_blocking
         self.max_bootstrap_wait_ms = max_bootstrap_wait_ms
+        self.wait_est_default = wait_est_default_tokens
+        # output lengths of completed requests, feeding the wait estimate
+        self._output_window: deque[int] = deque(maxlen=wait_est_window)
 
         self.ratio = init_new_token_ratio
         self.d_used = 0
@@ -140,15 +145,29 @@ class DecodeInstance(Actor):
             return "accept"
         return "wait"
 
+    def _est_output_tokens(self) -> int:
+        """Output-length estimate for wait-time prediction: a fixed
+        default until the completion window fills up, then the window's
+        p90; capped so a wild tail cannot blow up the estimate. This only
+        predicts waits -- the admission book above still accounts with the
+        declared cap, which is never predicted from history."""
+        if len(self._output_window) < self._output_window.maxlen:
+            est = self.wait_est_default
+        else:
+            xs = sorted(self._output_window)
+            est = xs[min(len(xs) - 1, int(0.9 * len(xs)))]
+        return min(est, self.clip, self.max_new_tokens)
+
     def _wait_over_budget(self, req: BootstrapRequest) -> bool:
         """Whether the estimated queue wait exceeds max_bootstrap_wait_ms.
 
         One pass, no sorting: the wait stays within budget iff the memory
         releasable before now+budget covers this request plus everyone
-        ahead in the queue. Finish times use the admission book's own
-        figures (declared cap x new_token_ratio) -- the true output length
-        is never consulted. Retries are exempt: they already spent prefill
-        compute and the retry margin guarantees they get in eventually.
+        ahead in the queue. Release times use the adaptive output-length
+        estimate (_est_output_tokens); a request's own reservation still
+        follows the admission book (declared cap x new_token_ratio).
+        Retries are exempt: they already spent prefill compute and the
+        retry margin guarantees they get in eventually.
         """
         budget = self.max_bootstrap_wait_ms
         if budget is None or req.retracted:
@@ -160,8 +179,9 @@ class DecodeInstance(Actor):
                 ahead.generated_so_far)
         iter_ms = self.perf.iter_latency_ms(max(len(self.running), 1))
         available = self.limit - self.d_used - self._offsets()
+        est_output = self._est_output_tokens()
         for st in self.admitted.values():
-            remaining = self._own_offset(st.generated)
+            remaining = max(est_output - st.generated, 1)
             if remaining * iter_ms <= budget:
                 available += st.prealloc + st.charged
         return need > available
@@ -275,6 +295,7 @@ class DecodeInstance(Actor):
         self.running.remove(st.spec.rid)
         del self.admitted[st.spec.rid]
         self.d_used -= st.prealloc + st.charged
+        self._output_window.append(st.generated)
         ctx.emit(ROUTER_ID, DoneNotice(spec=st.spec),
                  priority=PRIORITY_RELEASE)
 
