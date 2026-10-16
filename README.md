@@ -41,7 +41,7 @@ python cli.py --input examples/time-series.json
 
 # 叠加多实例场景配置，只看 90% 水位
 python cli.py --input examples/time-series.json \
-    --config scenarios/two_p_two_d.json --watermarks 0.9
+    --config scenarios/2p2d.json --watermarks 0.9
 
 # 运行测试
 python -m unittest discover -s tests -t . -v
@@ -157,8 +157,9 @@ TTFT/E2E 的 p95）。
 | `trace.print_decode_heartbeat` | false | 同上，D 侧心跳 |
 | `context_len` | 131072 | prompt 硬上限（顶层字段） |
 
-`scenarios/` 下有两个现成的多实例场景：`two_p_two_d.json`（2P+2D，
-round-robin）和 `four_p_two_d.json`（4P+2D，least-loaded）。
+`scenarios/` 下有三个现成的多实例场景：`2p2d.json`（2P+2D，
+round-robin）、`2p2d_admission.json`（同拓扑，叠加 5s 准入预算）和
+`4p2d.json`（4P+2D，least-loaded）。
 
 ## 工作原理
 
@@ -354,7 +355,8 @@ pick(spec, prefills, decodes) -> (prefill_id, decode_id)
 | `first_kv` | 到达 → 首个 KV chunk 到达 D（握手 + 首批算力 + 传输） |
 | **TTFT** | 到达 → 最后一块 KV 到达 D（首 token 在 prefill 前向结束时采样，随其送达） |
 
-汇总输出：决策计数、retract 次数与浪费的 prefill 算力
+汇总输出：决策计数与接受率（`accept_rate` = ACCEPT / 到达请求数）、
+retract 次数与浪费的 prefill 算力
 （`retract_rework_tokens`）、完成数、平均/p95 的准入等待、上述
 两个口径、端到端时延、双池峰值利用率。
 
@@ -377,10 +379,10 @@ sim_async/
 ├── cli.py               # 命令行入口 + trace 加载校验
 ├── actors/              # router.py / prefill.py / decode.py
 ├── policies/            # 调度策略插件：base / round_robin / least_loaded
-├── scenarios/           # 场景配置（two_p_two_d / four_p_two_d）
-├── examples/            # example.json、series_generate.py、time-series.json
+├── scenarios/           # 场景配置（2p2d / 2p2d_admission / 4p2d）
+├── examples/            # example.json、heavy-mixed.json、生成器脚本
 ├── traces/              # --trace 的事件流输出
-└── tests/               # 测试套件（56 个用例）
+└── tests/               # 测试套件（59 个用例）
 ```
 
 ## 待改进

@@ -4,7 +4,7 @@
 Examples:
     python cli.py --input examples/example.json
     python cli.py --input examples/example.json \
-        --config scenarios/example_trace.json --watermarks 0.7 0.9
+        --config scenarios/2p2d.json --watermarks 0.7 0.9
     python cli.py --input examples/example.json --trace
 """
 
@@ -84,7 +84,8 @@ def load_trace(path) -> list:
 
 
 def format_sweep(results: dict[float, dict]) -> str:
-    header = (f"{'watermark':>9} | {'ACCEPT':>6} | {'RJ_P':>4} | {'RJ_D':>4} | "
+    header = (f"{'watermark':>9} | {'ACCEPT':>6} | {'acc%':>5} | "
+              f"{'RJ_P':>4} | {'RJ_D':>4} | "
               f"{'retract':>7} | {'peak P':>7} | {'peak D':>7} | "
               f"{'wait ms':>9} | {'TTFT p95':>9} | {'E2E p95':>9}")
     lines = [header, "-" * len(header)]
@@ -96,6 +97,7 @@ def format_sweep(results: dict[float, dict]) -> str:
             "REJECT_DECODE_WAIT", 0)
         lines.append(
             f"{wm:>9.0%} | {dec.get('ACCEPT', 0):>6} | "
+            f"{s['accept_rate']:>5.0%} | "
             f"{rj_p:>4} | {rj_d:>4} | "
             f"{s['retracts']:>7} | {s['peak_prefill_util']:>6.1%} | "
             f"{s['peak_decode_util']:>6.1%} | {s['avg_wait_ms']:>9.1f} | "
