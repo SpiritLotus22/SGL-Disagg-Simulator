@@ -27,7 +27,7 @@ from engine import Actor, Context, PRIORITY_INTERNAL
 from perf import PrefillPerf, TransferChannel
 from protocol import (
     AssignPrefill, BootstrapGrant, BootstrapReject, BootstrapRequest,
-    BootstrapWait, DecisionNotice, Heartbeat, KvChunk, PrefillTick,
+    BootstrapWait, DecisionNotice, KvChunk, PrefillHeartbeat, PrefillTick,
     RetractRetry, RetractWaste,
 )
 
@@ -197,7 +197,7 @@ class PrefillInstance(Actor):
                      delay_ms=self.perf.tick_ms, priority=PRIORITY_INTERNAL)
 
     def _heartbeat(self, ctx: Context) -> None:
-        ctx.emit(ROUTER_ID, Heartbeat(
+        ctx.emit(ROUTER_ID, PrefillHeartbeat(
             prefill_id=self.actor_id,
             queued=len(self.waiting),
             active_tokens=self.pool_used,

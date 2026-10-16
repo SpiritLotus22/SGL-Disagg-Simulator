@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent))
 
 from protocol import (
-    DecodeHeartbeat, DecodeTick, Heartbeat, PrefillTick, RequestSpec,
+    DecodeHeartbeat, DecodeTick, PrefillHeartbeat, PrefillTick, RequestSpec,
 )
 from simulator import SimConfig, build
 
@@ -31,7 +31,7 @@ DEFAULT_WATERMARKS = (0.60, 0.70, 0.80, 0.90, 0.95)
 _QUIET_FLAGS = (
     ("trace_print_prefill_tick", PrefillTick),
     ("trace_print_decode_tick", DecodeTick),
-    ("trace_print_heartbeat", Heartbeat),
+    ("trace_print_prefill_heartbeat", PrefillHeartbeat),
     ("trace_print_decode_heartbeat", DecodeHeartbeat),
 )
 

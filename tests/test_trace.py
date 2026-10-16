@@ -4,7 +4,7 @@ import unittest
 
 from cli import parse_trace, trace_hidden_types
 from protocol import (
-    DecodeHeartbeat, DecodeTick, Heartbeat, KvChunk, PrefillTick,
+    DecodeHeartbeat, DecodeTick, KvChunk, PrefillHeartbeat, PrefillTick,
 )
 from simulator import SimConfig, build
 
@@ -63,11 +63,12 @@ class TestTraceEventFilter(unittest.TestCase):
     def test_hidden_by_default(self):
         hidden = trace_hidden_types(SimConfig())
         self.assertEqual(
-            hidden, {PrefillTick, DecodeTick, Heartbeat, DecodeHeartbeat})
+            hidden, {PrefillTick, DecodeTick, PrefillHeartbeat, DecodeHeartbeat})
 
     def test_scenario_reenables_one_by_one(self):
         config = SimConfig.from_dict({
-            "trace": {"print_prefill_tick": True, "print_heartbeat": True},
+            "trace": {"print_prefill_tick": True,
+                      "print_prefill_heartbeat": True},
         })
         hidden = trace_hidden_types(config)
         self.assertEqual(hidden, {DecodeTick, DecodeHeartbeat})
@@ -83,7 +84,7 @@ class TestTraceEventFilter(unittest.TestCase):
         sim.run()
         seen_types = {type(ev.message) for ev in seen}
         self.assertNotIn(PrefillTick, seen_types)
-        self.assertNotIn(Heartbeat, seen_types)
+        self.assertNotIn(PrefillHeartbeat, seen_types)
         self.assertIn(KvChunk, seen_types)  # real traffic still recorded
 
 

@@ -12,7 +12,7 @@ from engine import Actor, Context
 from policies.base import DecodeView, Policy, PoolView
 from protocol import (
     REJECT_PREFILL_PRESSURE, AssignPrefill, DecisionNotice, DoneNotice,
-    DecodeHeartbeat, Heartbeat, RouteRequest,
+    DecodeHeartbeat, PrefillHeartbeat, RouteRequest,
 )
 
 METRICS_ID = "metrics"
@@ -39,7 +39,7 @@ class Router(Actor):
     def handle(self, message, ctx: Context) -> None:
         if isinstance(message, RouteRequest):
             self._route(message.spec, ctx)
-        elif isinstance(message, Heartbeat):
+        elif isinstance(message, PrefillHeartbeat):
             self.prefill_views[message.prefill_id] = PoolView(
                 message.prefill_id, message.queued, message.active_tokens
             )

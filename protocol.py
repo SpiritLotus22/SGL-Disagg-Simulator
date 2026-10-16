@@ -128,7 +128,7 @@ class DoneNotice:
 # --- prefill -> router: state view for scheduling ----------------------------
 
 @dataclass(frozen=True)
-class Heartbeat:
+class PrefillHeartbeat:
     """Prefill state report for the router's scheduling views."""
 
     prefill_id: str
