@@ -32,7 +32,7 @@ class PrefillPerf:
 
 @dataclass(frozen=True)
 class DecodePerf:
-    base_ms: float = 50.0              # iteration latency at batch size 0
+    base_ms: float = 20.0              # iteration latency at batch size 0
     slope_ms: float = 0.5              # extra latency per concurrent request
 
     def iter_latency_ms(self, batch_size: int) -> float:

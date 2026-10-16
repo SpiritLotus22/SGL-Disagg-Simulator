@@ -109,7 +109,7 @@ TTFT/E2E 的 p95）。
   "prefill":  { "instances": 2, "pool_tokens": 131072, "tps": 40000,
                 "chunked_prefill_size": 8192 },
   "decode":   { "instances": 2, "pool_tokens": 200000, "watermark": 0.9,
-                "max_running_requests": 256, "iter_base_ms": 50,
+                "max_running_requests": 256, "iter_base_ms": 20,
                 "iter_slope_ms_per_req": 0.5, "max_new_tokens": 4096,
                 "clip_max_new_tokens": 4096,
                 "num_reserved_decode_tokens": 512,
@@ -133,7 +133,7 @@ TTFT/E2E 的 p95）。
 | `decode.pool_tokens` | 200000 | 单实例 KV 池容量（token） |
 | `decode.watermark` | 0.90 | 准入水位（池容量 × 水位 = 准入上限） |
 | `decode.max_running_requests` | 256 | 单实例最大并发请求数 |
-| `decode.iter_base_ms` | 50 | decode 迭代基础时延（batch=0） |
+| `decode.iter_base_ms` | 20 | decode 迭代基础时延（batch=0，单流 ≈50 tok/s） |
 | `decode.iter_slope_ms_per_req` | 0.5 | 每多一个并发请求增加的迭代时延 |
 | `decode.max_new_tokens` | 128 | 声明的输出上限：准入估算和生成截断都用它，对应 sglang `SamplingParams.max_new_tokens` 的默认值； trace 的 `output` 只是 EOS 落点，不参与估算 |
 | `decode.clip_max_new_tokens` | 4096 | 乐观准入中未来生成量估算的封顶 |
@@ -286,7 +286,7 @@ retract 兜底（见生命周期第 6 步）。
 - decode 是访存受限的：**每个运行中的请求每轮迭代恰好产出 1 个
   token**；
 - 迭代时延随 batch 增长：`iter_latency = iter_base_ms +
-  iter_slope_ms_per_req × batch_size`（默认 50ms + 0.5ms/请求）。
+  iter_slope_ms_per_req × batch_size`（默认 20ms + 0.5ms/请求）。
   吞吐 ≈ `batch / iter_latency`，饱和点自然涌现——这是 decode 侧
   backpressure 的物理来源；
 - **乐观准入**：判断余量时，除了真实占用，还为每个已准入请求虚拟
