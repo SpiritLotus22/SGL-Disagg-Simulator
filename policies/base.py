@@ -12,7 +12,7 @@ from protocol import RequestSpec
 
 
 @dataclass(frozen=True)
-class PoolView:
+class PrefillView:
     """Router's (heartbeat-based) view of one prefill node."""
 
     actor_id: str
@@ -31,7 +31,7 @@ class DecodeView:
 
 
 class Policy(Protocol):
-    def pick(self, spec: RequestSpec, prefills: list[PoolView],
+    def pick(self, spec: RequestSpec, prefills: list[PrefillView],
              decodes: list[DecodeView]) -> tuple[str, str]:
         """Return (prefill_actor_id, decode_actor_id) for this request."""
         ...

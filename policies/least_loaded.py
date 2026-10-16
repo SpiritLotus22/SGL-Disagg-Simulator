@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import random
 
-from policies.base import DecodeView, PoolView
+from policies.base import DecodeView, PrefillView
 from protocol import RequestSpec
 
 
@@ -17,11 +17,11 @@ class LeastLoaded:
     def __init__(self, rng: random.Random) -> None:
         self._rng = rng
 
-    def pick(self, spec: RequestSpec, prefills: list[PoolView],
+    def pick(self, spec: RequestSpec, prefills: list[PrefillView],
              decodes: list[DecodeView]) -> tuple[str, str]:
         return (self._pick_p(prefills), self._pick_d(decodes))
 
-    def _pick_p(self, views: list[PoolView]) -> str:
+    def _pick_p(self, views: list[PrefillView]) -> str:
         if len(views) == 1:
             return views[0].actor_id
         a, b = self._rng.sample(views, 2)
