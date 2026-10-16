@@ -55,6 +55,14 @@ class TestTrace(unittest.TestCase):
                                 "cache_hit": 400, "arrival_ms": 0}])[0]
         self.assertEqual(spec.extend_len, 600)
 
+    def test_bundled_traces_load(self):
+        from pathlib import Path
+        from cli import load_trace
+        for name in ("example.json", "time-series.json", "heavy-mixed.json"):
+            trace = load_trace(Path(__file__).parent.parent.joinpath(
+                "examples", name))
+            self.assertTrue(trace)
+
 
 class TestTraceEventFilter(unittest.TestCase):
     """--trace output: tick/heartbeat messages are hidden unless the
