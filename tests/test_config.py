@@ -43,12 +43,25 @@ class TestScenarioParsing(unittest.TestCase):
         self.assertEqual(cfg.max_bootstrap_wait_ms, 5000)
         self.assertEqual(cfg.prefill_max_queue_wait_ms, 1000)
 
+    def test_admission_scenario_produces_no_warnings(self):
+        import json
+        from pathlib import Path
+        scenario = json.loads(Path(
+            __file__).parent.parent.joinpath(
+            "scenarios", "2p2d_admission.json").read_text())
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            cfg = SimConfig.from_dict(scenario)
+        self.assertEqual(caught, [])
+        self.assertEqual(cfg.max_bootstrap_wait_ms, 5000)
+        self.assertEqual(cfg.prefill_max_queue_wait_ms, 5000)
+
     def test_full_scenario_produces_no_warnings(self):
         import json
         from pathlib import Path
         scenario = json.loads(Path(
             __file__).parent.parent.joinpath(
-            "scenarios", "two_p_two_d.json").read_text())
+            "scenarios", "2p2d.json").read_text())
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             SimConfig.from_dict(scenario)
