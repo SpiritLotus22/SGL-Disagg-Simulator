@@ -43,6 +43,19 @@ class TestBackpressure(unittest.TestCase):
         )
         self.assertEqual(summary["decisions"].get("REJECT_DECODE_KV"), 1)
         self.assertEqual(summary["completed"], 0)
+        self.assertEqual(summary["accept_rate"], 0.0)
+
+    def test_accept_rate_counts_arrivals(self):
+        # one accepted, one never-fits rejected: accept rate is 1/2
+        raw = [
+            {"input": 100, "output": 10, "cache_hit": 0, "arrival_ms": 0},
+            {"input": 50000, "output": 10, "cache_hit": 0, "arrival_ms": 0},
+        ]
+        summary, _ = run_trace(
+            raw, decode_pool_tokens=10_000, decode_kv_watermark=1.0,
+            num_reserved_decode_tokens=0,
+        )
+        self.assertEqual(summary["accept_rate"], 0.5)
 
     def test_context_len_hard_reject(self):
         raw = [{"input": 200_000, "output": 10, "cache_hit": 0,

@@ -118,6 +118,9 @@ class MetricsCollector(Actor):
         return {
             "requests": len(self.arrival_ms),
             "decisions": dict(decision_counts),
+            # share of arrived requests that were admitted (ACCEPT)
+            "accept_rate": (decision_counts.get(ACCEPT, 0)
+                            / len(self.arrival_ms)) if self.arrival_ms else 0.0,
             "retracts": sum(self.retracts.values()),
             "retract_rework_tokens": self.rework_tokens,
             "completed": len(self.done_ms),
