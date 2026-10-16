@@ -128,6 +128,7 @@ TTFT/E2E 的 p95）。
 | `prefill.tps` | 40000 | 单实例 prefill 吞吐（token/秒，共享） |
 | `prefill.chunked_prefill_size` | 8192 | 每个 KV chunk 的 token 数；`null` 关闭切块 |
 | `prefill.tick_ms` | 10 | prefill 调度 tick 的时长（算力分配粒度） |
+| `prefill.max_queue_wait_ms` | null | prefill 池排队的预估等待上限（ms），超过即打回 `REJECT_PREFILL_WAIT` 并释放 D 侧预留；`null` = 只排队不打回 |
 | `decode.instances` | 1 | decode 实例数 |
 | `decode.pool_tokens` | 200000 | 单实例 KV 池容量（token） |
 | `decode.watermark` | 0.90 | 准入水位（池容量 × 水位 = 准入上限） |
@@ -143,6 +144,7 @@ TTFT/E2E 的 p95）。
 | `decode.page_size` | 16 | KV 页对齐粒度 |
 | `decode.retract_retry_margin` | 2.0 | retract 重试的准入余量倍数（封顶在准入上限，空池一定能再进） |
 | `decode.head_of_line_blocking` | true | bootstrap 队列是否队首阻塞 |
+| `decode.max_bootstrap_wait_ms` | null | bootstrap 排队的预估等待上限（ms），超过即打回 `REJECT_DECODE_WAIT`；`null` = 只排队不打回 |
 | `transfer.bandwidth_gbps` | 50 | KV 传输带宽（GB/s，按每 P→D 通道） |
 | `transfer.base_latency_ms` | 2 | 单次传输基础时延 |
 | `transfer.bytes_per_token_kb` | 128 | 每 token 的 KV 字节数 |
@@ -192,7 +194,8 @@ Event = (time_ms, priority, seq, target, message)
 | `RouteRequest` | 装配层 → Router | 一条请求到达 |
 | `AssignPrefill` | Router → P | 调度决策（携带选定的 `decode_id`） |
 | `BootstrapRequest` | P → D | 请求 decode 侧预分配 KV |
-| `BootstrapGrant` / `BootstrapWait` / `BootstrapReject` | D → P | 成功 / 排队（等待不是拒绝）/ 硬拒 |
+| `BootstrapGrant` / `BootstrapWait` / `BootstrapReject` | D → P | 成功 / 排队（等待不是拒绝）/ 拒绝（独占放不下，或预估等待超预算） |
+| `BootstrapAbort` | P → D | P 侧放弃已获 Grant 的准入，D 释放 prealloc |
 | `KvChunk` | P → D | 一块 KV 数据，边算边传 |
 | `RetractRetry` | D → P | 显存超支，请求回炉重做 |
 | `RetractWaste` | P → metrics | 一次回撤丢弃的 prefill 算力 |
@@ -244,13 +247,24 @@ Event = (time_ms, priority, seq, target, message)
    prefill 计算发生之前，先真实预留 prompt KV（`ceil_page(input) +
    num_reserved_decode_tokens`），再为已准入请求的未来生成做乐观虚拟
    预留。余量够 → Grant；暂时不够 → 排队（等待不是拒绝）；独占也放
-   不下 → 硬拒 `REJECT_DECODE_KV`；
+   不下 → 硬拒 `REJECT_DECODE_KV`。若配置了
+   `decode.max_bootstrap_wait_ms`，排队前会先估算等待时间：按准入
+   账本口径（声明上限 × new_token_ratio，不读真实输出长度）估计每个
+   已准入请求的释放时刻，到预算时刻仍凑不够头寸 → 打回
+   `REJECT_DECODE_WAIT`；
 3. **Prefill 池闸门**（`PrefillInstance._promote`）：拿到 Grant 后，
    在途 prompt 总量不得超过 `prefill.pool_tokens`，超过则排队等池
-   空间。
+   空间。若配置了 `prefill.max_queue_wait_ms`，按均分算力的完成时刻
+   表预估等待，超过预算 → 打回 `REJECT_PREFILL_WAIT`，并发
+   `BootstrapAbort` 让 D 释放已预留的显存。
 
-三关全部是 backpressure 而非拒绝：除了两种硬拒，请求只会排队，不会
-被丢弃。乐观估计出错时由 retract 兜底（见生命周期第 6 步）。
+预估等待的打回只针对首次到达的请求；retract 重试豁免（它们的重做
+算力已经花掉，且重试头寸机制保证最终能进）。
+
+默认三关全部是 backpressure 而非拒绝：除了两种硬拒，请求只会排队，
+不会被丢弃；两个等待预算默认关闭（`null`），打开后预估排队过久的
+请求被快速打回，把无界的 TTFT 排队换成显式失败。乐观估计出错时由
+retract 兜底（见生命周期第 6 步）。
 
 ### Prefill 建模
 

@@ -13,6 +13,8 @@ from dataclasses import dataclass
 ACCEPT = "ACCEPT"
 REJECT_PREFILL_PRESSURE = "REJECT_PREFILL_PRESSURE"
 REJECT_DECODE_KV = "REJECT_DECODE_KV"
+REJECT_DECODE_WAIT = "REJECT_DECODE_WAIT"
+REJECT_PREFILL_WAIT = "REJECT_PREFILL_WAIT"
 
 
 @dataclass(frozen=True)
@@ -80,10 +82,22 @@ class BootstrapWait:
 
 @dataclass(frozen=True)
 class BootstrapReject:
-    """The request can never fit the decode pool, even alone: hard reject."""
+    """The decode node refuses the request: either it can never fit, even
+    alone, or the estimated queue wait exceeds the configured budget."""
 
     spec: RequestSpec
     reason: str
+    decision: str = REJECT_DECODE_KV
+
+
+@dataclass(frozen=True)
+class BootstrapAbort:
+    """The prefill node gives up a granted bootstrap because its own pool
+    wait would exceed the budget. The decode node releases the prealloc;
+    no prefill compute or KV transfer has happened for this attempt."""
+
+    spec: RequestSpec
+    attempt: int = 0
 
 
 # --- prefill -> decode: KV streaming -----------------------------------------

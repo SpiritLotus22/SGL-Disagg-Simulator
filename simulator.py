@@ -36,6 +36,7 @@ class SimConfig:
     prefill_tps: float = 40_000.0
     chunked_prefill_size: Optional[int] = 8_192
     prefill_tick_ms: float = 10.0
+    prefill_max_queue_wait_ms: Optional[float] = None
 
     # decode instances
     decode_instances: int = 1
@@ -53,6 +54,7 @@ class SimConfig:
     page_size: int = 16
     retract_retry_margin: float = 2.0
     head_of_line_blocking: bool = True
+    max_bootstrap_wait_ms: Optional[float] = None
 
     # KV transfer
     transfer_bandwidth_gbps: float = 50.0
@@ -93,6 +95,7 @@ class SimConfig:
             "prefill_tps": "prefill_tps",
             "prefill_chunked_prefill_size": "chunked_prefill_size",
             "prefill_tick_ms": "prefill_tick_ms",
+            "prefill_max_queue_wait_ms": "prefill_max_queue_wait_ms",
             "decode_instances": "decode_instances",
             "decode_pool_tokens": "decode_pool_tokens",
             "decode_watermark": "decode_kv_watermark",
@@ -108,6 +111,7 @@ class SimConfig:
             "decode_page_size": "page_size",
             "decode_retract_retry_margin": "retract_retry_margin",
             "decode_head_of_line_blocking": "head_of_line_blocking",
+            "decode_max_bootstrap_wait_ms": "max_bootstrap_wait_ms",
             "transfer_bandwidth_gbps": "transfer_bandwidth_gbps",
             "transfer_base_latency_ms": "transfer_base_latency_ms",
             "transfer_bytes_per_token_kb": "bytes_per_token_kb",
@@ -178,7 +182,8 @@ def build(config: SimConfig, trace: Trace) -> Simulation:
                     for did in decode_ids}
         prefills.append(PrefillInstance(pid, channels,
                                         config.prefill_pool_tokens,
-                                        p_perf, bytes_per_token))
+                                        p_perf, bytes_per_token,
+                                        config.prefill_max_queue_wait_ms))
     for did in decode_ids:
         decodes.append(DecodeInstance(
             did, config.decode_pool_tokens, config.decode_kv_watermark,
@@ -187,7 +192,7 @@ def build(config: SimConfig, trace: Trace) -> Simulation:
             config.num_reserved_decode_tokens, config.init_new_token_ratio,
             config.min_new_token_ratio, config.ratio_decay_per_iter,
             config.page_size, config.retract_retry_margin,
-            config.head_of_line_blocking))
+            config.head_of_line_blocking, config.max_bootstrap_wait_ms))
 
     router = Router(config.context_len, config.prefill_pool_tokens,
                     prefill_ids, decode_ids,
