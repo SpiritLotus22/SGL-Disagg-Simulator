@@ -87,7 +87,9 @@ LLM trace、Mooncake trace 等），写一个离线脚本输出上述格式即�
                     （默认 0.6 0.7 0.8 0.9 0.95）
 --seed N            调度策略的随机种子（默认 42）
 --trace             把完整事件流写入 traces/trace_<时间戳>.txt
-                    （仅支持单水位：多水位时事件流太长，无法逐一阅读）
+                    （仅支持单水位：多水位时事件流太长，无法逐一阅读；
+                    tick 与 heartbeat 占绝大多数消息，默认不打印，
+                    可用场景配置的 trace 段逐项打开）
 ```
 
 输出分两种模式：单水位打印完整 JSON 汇总（各分位数齐全）；多水位打印
@@ -144,6 +146,10 @@ TTFT/E2E 的 p95）。
 | `transfer.bandwidth_gbps` | 50 | KV 传输带宽（GB/s，按每 P→D 通道） |
 | `transfer.base_latency_ms` | 2 | 单次传输基础时延 |
 | `transfer.bytes_per_token_kb` | 128 | 每 token 的 KV 字节数 |
+| `trace.print_prefill_tick` | false | `--trace` 输出是否包含 prefill 调度 tick |
+| `trace.print_decode_tick` | false | 同上，decode 迭代 tick |
+| `trace.print_heartbeat` | false | 同上，P 侧心跳 |
+| `trace.print_decode_heartbeat` | false | 同上，D 侧心跳 |
 | `context_len` | 131072 | prompt 硬上限（顶层字段） |
 
 `scenarios/` 下有两个现成的多实例场景：`two_p_two_d.json`（2P+2D，

@@ -19,10 +19,27 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from protocol import RequestSpec
+from protocol import (
+    DecodeHeartbeat, DecodeTick, Heartbeat, PrefillTick, RequestSpec,
+)
 from simulator import SimConfig, build
 
 DEFAULT_WATERMARKS = (0.60, 0.70, 0.80, 0.90, 0.95)
+
+# These message types dominate the event stream and rarely help when
+# reading a trace; each is hidden unless the scenario opts back in.
+_QUIET_FLAGS = (
+    ("trace_print_prefill_tick", PrefillTick),
+    ("trace_print_decode_tick", DecodeTick),
+    ("trace_print_heartbeat", Heartbeat),
+    ("trace_print_decode_heartbeat", DecodeHeartbeat),
+)
+
+
+def trace_hidden_types(config: SimConfig) -> frozenset:
+    """Message types excluded from --trace output under this config."""
+    return frozenset(t for flag, t in _QUIET_FLAGS
+                     if not getattr(config, flag))
 
 
 def parse_request(data: dict, rid: int) -> tuple[float, "RequestSpec"]:
@@ -120,11 +137,15 @@ def main(argv=None) -> int:
             traces_dir.mkdir(exist_ok=True)
             stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             report_path = traces_dir / f"trace_{stamp}.txt"
+            hidden = trace_hidden_types(config)
             with open(report_path, "w", encoding="utf-8") as fh:
-                sim.engine.add_observer(
-                    lambda now, ev: fh.write(
+                def record(now, ev):
+                    if type(ev.message) in hidden:
+                        return
+                    fh.write(
                         f"{now:>12.2f} ms  -> {ev.target:<10} "
-                        f"{type(ev.message).__name__} {ev.message}\n"))
+                        f"{type(ev.message).__name__} {ev.message}\n")
+                sim.engine.add_observer(record)
                 summary = sim.run()
             print(f"event trace written to {report_path}")
         else:

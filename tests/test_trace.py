@@ -2,7 +2,11 @@
 
 import unittest
 
-from cli import parse_trace
+from cli import parse_trace, trace_hidden_types
+from protocol import (
+    DecodeHeartbeat, DecodeTick, Heartbeat, KvChunk, PrefillTick,
+)
+from simulator import SimConfig, build
 
 
 class TestTrace(unittest.TestCase):
@@ -50,6 +54,37 @@ class TestTrace(unittest.TestCase):
         _, spec = parse_trace([{"input": 1000, "output": 10,
                                 "cache_hit": 400, "arrival_ms": 0}])[0]
         self.assertEqual(spec.extend_len, 600)
+
+
+class TestTraceEventFilter(unittest.TestCase):
+    """--trace output: tick/heartbeat messages are hidden unless the
+    scenario's trace section re-enables them one by one."""
+
+    def test_hidden_by_default(self):
+        hidden = trace_hidden_types(SimConfig())
+        self.assertEqual(
+            hidden, {PrefillTick, DecodeTick, Heartbeat, DecodeHeartbeat})
+
+    def test_scenario_reenables_one_by_one(self):
+        config = SimConfig.from_dict({
+            "trace": {"print_prefill_tick": True, "print_heartbeat": True},
+        })
+        hidden = trace_hidden_types(config)
+        self.assertEqual(hidden, {DecodeTick, DecodeHeartbeat})
+
+    def test_filtered_event_stream(self):
+        raw = [{"input": 1000, "output": 5, "cache_hit": 0, "arrival_ms": 0}]
+        sim = build(SimConfig(), parse_trace(raw))
+        hidden = trace_hidden_types(sim.config)
+        seen = []
+        sim.engine.add_observer(
+            lambda now, ev: seen.append(ev)
+            if type(ev.message) not in hidden else None)
+        sim.run()
+        seen_types = {type(ev.message) for ev in seen}
+        self.assertNotIn(PrefillTick, seen_types)
+        self.assertNotIn(Heartbeat, seen_types)
+        self.assertIn(KvChunk, seen_types)  # real traffic still recorded
 
 
 if __name__ == "__main__":
