@@ -59,6 +59,13 @@ class SimConfig:
     transfer_base_latency_ms: float = 2.0
     bytes_per_token_kb: float = 128.0
 
+    # --trace event output: tick/heartbeat messages flood the stream, so
+    # each kind needs an explicit opt-in via the scenario's trace section
+    trace_print_prefill_tick: bool = False
+    trace_print_decode_tick: bool = False
+    trace_print_heartbeat: bool = False
+    trace_print_decode_heartbeat: bool = False
+
     @classmethod
     def from_dict(cls, cfg: dict) -> "SimConfig":
         """Build a config from a nested scenario dict.
@@ -105,6 +112,10 @@ class SimConfig:
             "transfer_base_latency_ms": "transfer_base_latency_ms",
             "transfer_bytes_per_token_kb": "bytes_per_token_kb",
             "context_len": "context_len",
+            "trace_print_prefill_tick": "trace_print_prefill_tick",
+            "trace_print_decode_tick": "trace_print_decode_tick",
+            "trace_print_heartbeat": "trace_print_heartbeat",
+            "trace_print_decode_heartbeat": "trace_print_decode_heartbeat",
         }
         kwargs = {}
         for k, v in flat.items():
