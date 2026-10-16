@@ -207,7 +207,7 @@ Event = (time_ms, priority, seq, target, message)
 3. **bootstrap 握手**：P 向选定的 D 发 `BootstrapRequest`。D 计算
    `required = ceil_page(input) + num_reserved_decode_tokens`：
    - `required > 池容量 × 水位`（独占也放不下）→ 硬拒 `REJECT_DECODE_KV`；
-   - 头寸够 → **真实预留**这部分显存，回 `BootstrapGrant`；
+   - 余量够 → **真实预留**这部分显存，回 `BootstrapGrant`；
    - 暂时不够 → 进 D 的等待队列（backpressure，等待不是拒绝）；
 4. **prefill**：P 收到 Grant 后开始计算（受 prefill 池显存闸门和共享
    算力约束），KV 边算边经传输通道发往 D；最后一个 chunk 发出后释放
@@ -223,7 +223,7 @@ Event = (time_ms, priority, seq, target, message)
    池容量，D 先回撤 KV 未收齐的请求（不损失 decode 进度，只浪费在途
    prefill 算力），不够再回撤最晚开始 decode 的请求；被回撤的请求
    保留已生成 token，回 P 中止本地工作后重做握手与 prefill，且重试
-   要求更大的头寸（`retract_retry_margin`）防止反复振荡；丢弃的
+   要求更大的余量（`retract_retry_margin`）防止反复振荡；丢弃的
    prefill 算力计入 `retract_rework_tokens`，同时准入估算调回悲观。
 
 ### 准入控制链
@@ -237,7 +237,7 @@ Event = (time_ms, priority, seq, target, message)
 2. **Decode 侧 prealloc 闸门**（`DecodeInstance._verdict`）：在任何
    prefill 计算发生之前，先真实预留 prompt KV（`ceil_page(input) +
    num_reserved_decode_tokens`），再为已准入请求的未来生成做乐观虚拟
-   预留。头寸够 → Grant；暂时不够 → 排队（等待不是拒绝）；独占也放
+   预留。余量够 → Grant；暂时不够 → 排队（等待不是拒绝）；独占也放
    不下 → 硬拒 `REJECT_DECODE_KV`；
 3. **Prefill 池闸门**（`PrefillInstance._promote`）：拿到 Grant 后，
    在途 prompt 总量不得超过 `prefill.pool_tokens`，超过则排队等池
@@ -269,7 +269,7 @@ Event = (time_ms, priority, seq, target, message)
   iter_slope_ms_per_req × batch_size`（默认 50ms + 0.5ms/请求）。
   吞吐 ≈ `batch / iter_latency`，饱和点自然涌现——这是 decode 侧
   backpressure 的物理来源；
-- **乐观准入**：判断头寸时，除了真实占用，还为每个已准入请求虚拟
+- **乐观准入**：判断余量时，除了真实占用，还为每个已准入请求虚拟
   预留 `min(max_new_tokens − 已生成, clip_max_new_tokens) ×
   new_token_ratio`——与 sglang 的 `_get_running_request_total_token_offset`
   一致，用的是声明上限而不是真实输出长度（系统无法预知 EOS）；
@@ -277,7 +277,7 @@ Event = (time_ms, priority, seq, target, message)
   `min_new_token_ratio`），一旦发生 retract 立刻重置回初值（变悲观）；
 - **retract**：实际占用超过物理池时，先回撤 KV 未收齐的请求（最新
   grant 优先），再回撤最晚开始 decode 的请求；重试按
-  `retract_retry_margin` 倍头寸准入；
+  `retract_retry_margin` 倍余量准入；
 - **并发上限**：`max_running_requests` 到顶后不再发放 Grant。
 
 ### KV 传输建模
