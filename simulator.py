@@ -55,6 +55,8 @@ class SimConfig:
     retract_retry_margin: float = 2.0
     head_of_line_blocking: bool = True
     max_bootstrap_wait_ms: Optional[float] = None
+    wait_est_default_tokens: int = 640
+    wait_est_window: int = 100
 
     # KV transfer
     transfer_bandwidth_gbps: float = 50.0
@@ -112,6 +114,8 @@ class SimConfig:
             "decode_retract_retry_margin": "retract_retry_margin",
             "decode_head_of_line_blocking": "head_of_line_blocking",
             "decode_max_bootstrap_wait_ms": "max_bootstrap_wait_ms",
+            "decode_wait_est_default_tokens": "wait_est_default_tokens",
+            "decode_wait_est_window": "wait_est_window",
             "transfer_bandwidth_gbps": "transfer_bandwidth_gbps",
             "transfer_base_latency_ms": "transfer_base_latency_ms",
             "transfer_bytes_per_token_kb": "bytes_per_token_kb",
@@ -192,7 +196,8 @@ def build(config: SimConfig, trace: Trace) -> Simulation:
             config.num_reserved_decode_tokens, config.init_new_token_ratio,
             config.min_new_token_ratio, config.ratio_decay_per_iter,
             config.page_size, config.retract_retry_margin,
-            config.head_of_line_blocking, config.max_bootstrap_wait_ms))
+            config.head_of_line_blocking, config.max_bootstrap_wait_ms,
+            config.wait_est_default_tokens, config.wait_est_window))
 
     router = Router(config.context_len, config.prefill_pool_tokens,
                     prefill_ids, decode_ids,

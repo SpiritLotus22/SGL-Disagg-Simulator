@@ -145,6 +145,8 @@ TTFT/E2E 的 p95）。
 | `decode.retract_retry_margin` | 2.0 | retract 重试的准入余量倍数（封顶在准入上限，空池一定能再进） |
 | `decode.head_of_line_blocking` | true | bootstrap 队列是否队首阻塞 |
 | `decode.max_bootstrap_wait_ms` | null | bootstrap 排队的预估等待上限（ms），超过即打回 `REJECT_DECODE_WAIT`；`null` = 只排队不打回 |
+| `decode.wait_est_default_tokens` | 640 | 等待估算用的默认生成长度（完成窗口未满时用） |
+| `decode.wait_est_window` | 100 | 生成长度滑动窗口大小；窗口满后改用窗口 p90 做等待估算 |
 | `transfer.bandwidth_gbps` | 50 | KV 传输带宽（GB/s，按每 P→D 通道） |
 | `transfer.base_latency_ms` | 2 | 单次传输基础时延 |
 | `transfer.bytes_per_token_kb` | 128 | 每 token 的 KV 字节数 |
@@ -248,9 +250,11 @@ Event = (time_ms, priority, seq, target, message)
    num_reserved_decode_tokens`），再为已准入请求的未来生成做乐观虚拟
    预留。余量够 → Grant；暂时不够 → 排队（等待不是拒绝）；独占也放
    不下 → 硬拒 `REJECT_DECODE_KV`。若配置了
-   `decode.max_bootstrap_wait_ms`，排队前会先估算等待时间：按准入
-   账本口径（声明上限 × new_token_ratio，不读真实输出长度）估计每个
-   已准入请求的释放时刻，到预算时刻仍凑不够头寸 → 打回
+   `decode.max_bootstrap_wait_ms`，排队前会先估算等待时间：每个已准入
+   请求的释放时刻按自适应生成长度估算（默认 640 token，完成请求满
+   `wait_est_window` 个后取窗口内 p90，封顶
+   `min(clip_max_new_tokens, max_new_tokens)`；只用于预测，准入账本
+   仍按声明上限记账），到预算时刻仍凑不够头寸 → 打回
    `REJECT_DECODE_WAIT`；
 3. **Prefill 池闸门**（`PrefillInstance._promote`）：拿到 Grant 后，
    在途 prompt 总量不得超过 `prefill.pool_tokens`，超过则排队等池
