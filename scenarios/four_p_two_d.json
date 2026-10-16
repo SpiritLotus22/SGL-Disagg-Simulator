@@ -12,7 +12,7 @@
     "pool_tokens": 400000,
     "watermark": 0.9,
     "max_running_requests": 512,
-    "iter_base_ms": 50,
+    "iter_base_ms": 20,
     "iter_slope_ms_per_req": 0.5,
     "max_new_tokens": 4096,
     "clip_max_new_tokens": 4096,

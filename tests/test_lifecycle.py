@@ -28,8 +28,8 @@ class TestLifecycle(unittest.TestCase):
         self.assertLess(summary["avg_first_kv_ms"], 400)
         self.assertGreater(summary["avg_ttft_ms"],
                            summary["avg_first_kv_ms"])
-        # E2E = prefill + 100 decode iterations (~50ms each at batch 1)
-        self.assertGreater(summary["avg_e2e_ms"], 5000)
+        # E2E = prefill + 100 decode iterations (~20ms each at batch 1)
+        self.assertGreater(summary["avg_e2e_ms"], 2500)
 
     def test_full_cache_hit_skips_compute(self):
         raw = [{"input": 16000, "output": 10, "cache_hit": 16000,

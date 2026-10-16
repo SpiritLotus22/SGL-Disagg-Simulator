@@ -43,7 +43,7 @@ class SimConfig:
     decode_pool_tokens: int = 200_000
     decode_kv_watermark: float = 0.90
     max_running_requests: int = 256
-    decode_iter_base_ms: float = 50.0
+    decode_iter_base_ms: float = 20.0
     decode_iter_slope_ms: float = 0.5
     max_new_tokens: int = 128
     clip_max_new_tokens: int = 4_096
