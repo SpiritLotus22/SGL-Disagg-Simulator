@@ -35,8 +35,9 @@ from dataclasses import dataclass
 from engine import Actor, Context, PRIORITY_INTERNAL, PRIORITY_RELEASE
 from perf import DecodePerf
 from protocol import (
-    BootstrapGrant, BootstrapReject, BootstrapRequest, BootstrapWait,
-    DecodeHeartbeat, DecodeTick, DoneNotice, KvChunk, RetractRetry,
+    BootstrapAbort, BootstrapGrant, BootstrapReject, BootstrapRequest,
+    BootstrapWait, DecodeHeartbeat, DecodeTick, DoneNotice, KvChunk,
+    RetractRetry, REJECT_DECODE_WAIT,
 )
 
 ROUTER_ID = "router"
@@ -64,7 +65,8 @@ class DecodeInstance(Actor):
                  init_new_token_ratio: float, min_new_token_ratio: float,
                  ratio_decay_per_iter: float, page_size: int,
                  retract_retry_margin: float = 2.0,
-                 head_of_line_blocking: bool = True):
+                 head_of_line_blocking: bool = True,
+                 max_bootstrap_wait_ms: float | None = None):
         self.actor_id = actor_id
         self.pool_tokens = pool_tokens
         self.limit = pool_tokens * watermark
@@ -79,6 +81,7 @@ class DecodeInstance(Actor):
         self.page_size = page_size
         self.retry_margin = retract_retry_margin
         self.hol_blocking = head_of_line_blocking
+        self.max_bootstrap_wait_ms = max_bootstrap_wait_ms
 
         self.ratio = init_new_token_ratio
         self.d_used = 0
@@ -92,6 +95,8 @@ class DecodeInstance(Actor):
     def handle(self, message, ctx: Context) -> None:
         if isinstance(message, BootstrapRequest):
             self._on_bootstrap(message, ctx)
+        elif isinstance(message, BootstrapAbort):
+            self._on_abort(message, ctx)
         elif isinstance(message, KvChunk):
             self._on_chunk(message, ctx)
         elif isinstance(message, DecodeTick):
@@ -113,14 +118,17 @@ class DecodeInstance(Actor):
             total += min(remaining, self.clip) * self.ratio
         return total
 
+    def _own_offset(self, generated_so_far: int) -> float:
+        return min(self.max_new_tokens - generated_so_far,
+                   self.clip) * self.ratio
+
     def _verdict(self, req: BootstrapRequest) -> str:
         required = self._required(req.spec)
         if required > self.limit:
             return "never_fits"
         if len(self.admitted) >= self.max_running:
             return "wait"
-        own_offset = (min(self.max_new_tokens - req.generated_so_far,
-                          self.clip) * self.ratio)
+        own_offset = self._own_offset(req.generated_so_far)
         allocatable = self.limit - self.d_used - self._offsets()
         need = required + own_offset
         if req.retracted:
@@ -132,18 +140,53 @@ class DecodeInstance(Actor):
             return "accept"
         return "wait"
 
+    def _wait_over_budget(self, req: BootstrapRequest) -> bool:
+        """Whether the estimated queue wait exceeds max_bootstrap_wait_ms.
+
+        One pass, no sorting: the wait stays within budget iff the memory
+        releasable before now+budget covers this request plus everyone
+        ahead in the queue. Finish times use the admission book's own
+        figures (declared cap x new_token_ratio) -- the true output length
+        is never consulted. Retries are exempt: they already spent prefill
+        compute and the retry margin guarantees they get in eventually.
+        """
+        budget = self.max_bootstrap_wait_ms
+        if budget is None or req.retracted:
+            return False
+        need = self._required(req.spec) + self._own_offset(
+            req.generated_so_far)
+        for ahead in self.wait_queue:
+            need += self._required(ahead.spec) + self._own_offset(
+                ahead.generated_so_far)
+        iter_ms = self.perf.iter_latency_ms(max(len(self.running), 1))
+        available = self.limit - self.d_used - self._offsets()
+        for st in self.admitted.values():
+            remaining = self._own_offset(st.generated)
+            if remaining * iter_ms <= budget:
+                available += st.prealloc + st.charged
+        return need > available
+
     def _on_bootstrap(self, req: BootstrapRequest, ctx: Context) -> None:
         verdict = self._verdict(req)
         if verdict == "accept":
             self._grant(req, ctx)
         elif verdict == "wait":
-            # Retries queue ahead of fresh requests: their rework is already
-            # spent, so they are served first once headroom appears.
-            if req.retracted:
-                self.wait_queue.appendleft(req)
+            if self._wait_over_budget(req):
+                # Fast fail instead of queueing: the estimated wait would
+                # blow up this request's TTFT.
+                ctx.emit(req.origin, BootstrapReject(
+                    spec=req.spec, decision=REJECT_DECODE_WAIT,
+                    reason=f"estimated bootstrap wait exceeds budget "
+                           f"{self.max_bootstrap_wait_ms} ms"))
             else:
-                self.wait_queue.append(req)
-            ctx.emit(req.origin, BootstrapWait(spec=req.spec))
+                # Retries queue ahead of fresh requests: their rework is
+                # already spent, so they are served first once headroom
+                # appears.
+                if req.retracted:
+                    self.wait_queue.appendleft(req)
+                else:
+                    self.wait_queue.append(req)
+                ctx.emit(req.origin, BootstrapWait(spec=req.spec))
         else:
             required = self._required(req.spec)
             ctx.emit(req.origin, BootstrapReject(
@@ -161,6 +204,16 @@ class DecodeInstance(Actor):
             grant_ms=ctx.now)
         ctx.emit(req.origin, BootstrapGrant(spec=req.spec,
                  generated_so_far=req.generated_so_far, attempt=req.attempt))
+
+    def _on_abort(self, msg: BootstrapAbort, ctx: Context) -> None:
+        """The prefill node abandoned this granted request: release the
+        prealloc. No KV was ever sent, so there is nothing else to undo."""
+        st = self.admitted.pop(msg.spec.rid, None)
+        if st is None or st.attempt != msg.attempt:
+            return  # already retracted, or re-granted under a new attempt
+        self.d_used -= st.prealloc + st.charged
+        self._rescan_wait_queue(ctx)
+        self._heartbeat(ctx)
 
     def _rescan_wait_queue(self, ctx: Context) -> None:
         blocked = False

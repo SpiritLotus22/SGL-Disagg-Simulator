@@ -90,10 +90,13 @@ def format_sweep(results: dict[float, dict]) -> str:
     lines = [header, "-" * len(header)]
     for wm, s in results.items():
         dec = s["decisions"]
+        rj_p = dec.get("REJECT_PREFILL_PRESSURE", 0) + dec.get(
+            "REJECT_PREFILL_WAIT", 0)
+        rj_d = dec.get("REJECT_DECODE_KV", 0) + dec.get(
+            "REJECT_DECODE_WAIT", 0)
         lines.append(
             f"{wm:>9.0%} | {dec.get('ACCEPT', 0):>6} | "
-            f"{dec.get('REJECT_PREFILL_PRESSURE', 0):>4} | "
-            f"{dec.get('REJECT_DECODE_KV', 0):>4} | "
+            f"{rj_p:>4} | {rj_d:>4} | "
             f"{s['retracts']:>7} | {s['peak_prefill_util']:>6.1%} | "
             f"{s['peak_decode_util']:>6.1%} | {s['avg_wait_ms']:>9.1f} | "
             f"{s['p95_ttft_ms']:>9.1f} | {s['p95_e2e_ms']:>9.1f}"

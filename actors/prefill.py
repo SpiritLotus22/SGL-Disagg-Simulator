@@ -26,9 +26,9 @@ from __future__ import annotations
 from engine import Actor, Context, PRIORITY_INTERNAL
 from perf import PrefillPerf, TransferChannel
 from protocol import (
-    AssignPrefill, BootstrapGrant, BootstrapReject, BootstrapRequest,
-    BootstrapWait, DecisionNotice, KvChunk, PrefillHeartbeat, PrefillTick,
-    RetractRetry, RetractWaste,
+    REJECT_PREFILL_WAIT, AssignPrefill, BootstrapAbort, BootstrapGrant,
+    BootstrapReject, BootstrapRequest, BootstrapWait, DecisionNotice,
+    KvChunk, PrefillHeartbeat, PrefillTick, RetractRetry, RetractWaste,
 )
 
 METRICS_ID = "metrics"
@@ -52,12 +52,14 @@ class _PReq:
 class PrefillInstance(Actor):
     def __init__(self, actor_id: str, channels: dict[str, TransferChannel],
                  pool_tokens: int, perf: PrefillPerf,
-                 bytes_per_token: float):
+                 bytes_per_token: float,
+                 max_queue_wait_ms: float | None = None):
         self.actor_id = actor_id
         self.channels = channels          # one per decode instance
         self.pool_tokens = pool_tokens
         self.perf = perf
         self.bytes_per_token = bytes_per_token
+        self.max_queue_wait_ms = max_queue_wait_ms
         self.pending: dict[int, str] = {}  # rid -> decode_id, in bootstrap
         self.attempts: dict[int, int] = {}  # rid -> handshake round
         self.waiting: list[_PReq] = []     # granted, awaiting pool room
@@ -76,16 +78,26 @@ class PrefillInstance(Actor):
                 attempt=self.attempts.get(rid, 0)))
         elif isinstance(message, BootstrapGrant):
             decode_id = self.pending.pop(message.spec.rid)
-            self.waiting.append(_PReq(message.spec, decode_id,
-                                      message.generated_so_far,
-                                      message.attempt))
-            self._promote(ctx)
+            req = _PReq(message.spec, decode_id, message.generated_so_far,
+                        message.attempt)
+            if self._wait_over_budget(req):
+                # Fast fail: release the decode prealloc and report the
+                # rejection instead of queueing past the wait budget.
+                ctx.emit(decode_id, BootstrapAbort(spec=message.spec,
+                                                   attempt=message.attempt))
+                ctx.emit(METRICS_ID, DecisionNotice(
+                    rid=message.spec.rid, decision=REJECT_PREFILL_WAIT,
+                    reason=f"estimated prefill pool wait exceeds budget "
+                           f"{self.max_queue_wait_ms} ms"))
+            else:
+                self.waiting.append(req)
+                self._promote(ctx)
         elif isinstance(message, BootstrapWait):
             pass  # backpressure: the decode node queues us; just wait
         elif isinstance(message, BootstrapReject):
             self.pending.pop(message.spec.rid, None)
             ctx.emit(METRICS_ID, DecisionNotice(
-                rid=message.spec.rid, decision="REJECT_DECODE_KV",
+                rid=message.spec.rid, decision=message.decision,
                 reason=message.reason))
         elif isinstance(message, RetractRetry):
             self._on_retract(message, ctx)
@@ -128,6 +140,42 @@ class PrefillInstance(Actor):
             self._promote(ctx)  # the dropped request freed pool room
 
     # -- prefill scheduling --------------------------------------------------
+
+    def _wait_over_budget(self, req: _PReq) -> bool:
+        """Whether the estimated wait for pool room exceeds
+        max_queue_wait_ms.
+
+        The wait stays within budget iff the pool space releasable before
+        now+budget covers this request plus everyone ahead in the waiting
+        list (strict FIFO, matching _promote). Fair sharing gives every
+        active the same token rate, so actives finish in ascending order
+        of remaining compute and each completion speeds up the rest; only
+        current actives are counted -- compute not yet admitted would make
+        the estimate worse, so this is optimistic. Retries are exempt.
+        """
+        budget = self.max_queue_wait_ms
+        if budget is None or req.attempt > 0:
+            return False
+        if not self.waiting and \
+                self.pool_used + req.spec.input_tokens <= self.pool_tokens:
+            return False  # promotes immediately, no wait at all
+        need = req.spec.input_tokens
+        need += sum(st.spec.input_tokens for st in self.waiting)
+        available = self.pool_tokens - self.pool_used
+        actives = sorted(self.active,
+                         key=lambda st: st.spec.extend_len - st.prefilled)
+        tokens_per_ms = self.perf.tps / 1000.0
+        elapsed = 0.0
+        prev = 0.0
+        n = len(actives)
+        for i, st in enumerate(actives):
+            rem = st.spec.extend_len - st.prefilled
+            elapsed += (rem - prev) * (n - i) / tokens_per_ms
+            prev = rem
+            if elapsed > budget:
+                break
+            available += st.spec.input_tokens
+        return need > available
 
     def _promote(self, ctx: Context) -> None:
         """Move granted requests into the active set while the pool has room."""
